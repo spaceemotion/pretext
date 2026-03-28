@@ -10,13 +10,6 @@ export type SegmentBreakKind =
   | 'soft-hyphen'
   | 'hard-break'
 
-type SegmentationPiece = {
-  text: string
-  isWordLike: boolean
-  kind: SegmentBreakKind
-  start: number
-}
-
 export type MergedSegmentation = {
   len: number
   texts: string[]
@@ -392,13 +385,15 @@ function classifySegmentBreakCharCode(code: number, whiteSpaceProfile: WhiteSpac
   return 'text'
 }
 
-function splitSegmentByBreakKind(
+// Callback-based segment splitting — avoids allocating a pieces array + piece objects.
+// The callback receives (pieceText, pieceIsWordLike, pieceKind, pieceStart) for each sub-segment.
+function forEachBreakKindPiece(
   segment: string,
   isWordLike: boolean,
   start: number,
   whiteSpaceProfile: WhiteSpaceProfile,
-): SegmentationPiece[] {
-  const pieces: SegmentationPiece[] = []
+  callback: (text: string, isWordLike: boolean, kind: SegmentBreakKind, start: number) => void,
+): void {
   let currentKind: SegmentBreakKind | null = null
   let runStart = 0
   let currentStart = start
@@ -426,12 +421,7 @@ function splitSegmentByBreakKind(
     }
 
     if (currentKind !== null) {
-      pieces.push({
-        text: segment.slice(runStart, i),
-        isWordLike: currentWordLike,
-        kind: currentKind,
-        start: currentStart,
-      })
+      callback(segment.slice(runStart, i), currentWordLike, currentKind, currentStart)
     }
 
     currentKind = kind
@@ -442,15 +432,8 @@ function splitSegmentByBreakKind(
   }
 
   if (currentKind !== null) {
-    pieces.push({
-      text: segment.slice(runStart),
-      isWordLike: currentWordLike,
-      kind: currentKind,
-      start: currentStart,
-    })
+    callback(segment.slice(runStart), currentWordLike, currentKind!, currentStart)
   }
-
-  return pieces
 }
 
 function isTextRunBoundary(kind: SegmentBreakKind): boolean {
@@ -923,77 +906,77 @@ function buildMergedSegmentation(
   const mergedStarts: number[] = []
 
   for (const s of wordSegmenter.segment(normalized)) {
-    for (const piece of splitSegmentByBreakKind(s.segment, s.isWordLike ?? false, s.index, whiteSpaceProfile)) {
-      const isText = piece.kind === 'text'
+    forEachBreakKindPiece(s.segment, s.isWordLike ?? false, s.index, whiteSpaceProfile, (pieceText, pieceWordLike, pieceKind, pieceStart) => {
+      const isText = pieceKind === 'text'
 
       if (
         profile.carryCJKAfterClosingQuote &&
         isText &&
         mergedLen > 0 &&
         mergedKinds[mergedLen - 1] === 'text' &&
-        isCJK(piece.text) &&
+        isCJK(pieceText) &&
         isCJK(mergedTexts[mergedLen - 1]!) &&
         endsWithClosingQuote(mergedTexts[mergedLen - 1]!)
       ) {
-        mergedTexts[mergedLen - 1] += piece.text
-        mergedWordLike[mergedLen - 1] = mergedWordLike[mergedLen - 1]! || piece.isWordLike
+        mergedTexts[mergedLen - 1] += pieceText
+        mergedWordLike[mergedLen - 1] = mergedWordLike[mergedLen - 1]! || pieceWordLike
       } else if (
         isText &&
         mergedLen > 0 &&
         mergedKinds[mergedLen - 1] === 'text' &&
-        isCJKLineStartProhibitedSegment(piece.text) &&
+        isCJKLineStartProhibitedSegment(pieceText) &&
         isCJK(mergedTexts[mergedLen - 1]!)
       ) {
-        mergedTexts[mergedLen - 1] += piece.text
-        mergedWordLike[mergedLen - 1] = mergedWordLike[mergedLen - 1]! || piece.isWordLike
+        mergedTexts[mergedLen - 1] += pieceText
+        mergedWordLike[mergedLen - 1] = mergedWordLike[mergedLen - 1]! || pieceWordLike
       } else if (
         isText &&
         mergedLen > 0 &&
         mergedKinds[mergedLen - 1] === 'text' &&
         endsWithMyanmarMedialGlue(mergedTexts[mergedLen - 1]!)
       ) {
-        mergedTexts[mergedLen - 1] += piece.text
-        mergedWordLike[mergedLen - 1] = mergedWordLike[mergedLen - 1]! || piece.isWordLike
+        mergedTexts[mergedLen - 1] += pieceText
+        mergedWordLike[mergedLen - 1] = mergedWordLike[mergedLen - 1]! || pieceWordLike
       } else if (
         isText &&
         mergedLen > 0 &&
         mergedKinds[mergedLen - 1] === 'text' &&
-        piece.isWordLike &&
-        containsArabicScript(piece.text) &&
+        pieceWordLike &&
+        containsArabicScript(pieceText) &&
         endsWithArabicNoSpacePunctuation(mergedTexts[mergedLen - 1]!)
       ) {
-        mergedTexts[mergedLen - 1] += piece.text
+        mergedTexts[mergedLen - 1] += pieceText
         mergedWordLike[mergedLen - 1] = true
       } else if (
         isText &&
-        !piece.isWordLike &&
+        !pieceWordLike &&
         mergedLen > 0 &&
         mergedKinds[mergedLen - 1] === 'text' &&
-        piece.text.length === 1 &&
-        piece.text !== '-' &&
-        piece.text !== '—' &&
-        isRepeatedSingleCharRun(mergedTexts[mergedLen - 1]!, piece.text)
+        pieceText.length === 1 &&
+        pieceText !== '-' &&
+        pieceText !== '—' &&
+        isRepeatedSingleCharRun(mergedTexts[mergedLen - 1]!, pieceText)
       ) {
-        mergedTexts[mergedLen - 1] += piece.text
+        mergedTexts[mergedLen - 1] += pieceText
       } else if (
         isText &&
-        !piece.isWordLike &&
+        !pieceWordLike &&
         mergedLen > 0 &&
         mergedKinds[mergedLen - 1] === 'text' &&
         (
-          isLeftStickyPunctuationSegment(piece.text) ||
-          (piece.text === '-' && mergedWordLike[mergedLen - 1]!)
+          isLeftStickyPunctuationSegment(pieceText) ||
+          (pieceText === '-' && mergedWordLike[mergedLen - 1]!)
         )
       ) {
-        mergedTexts[mergedLen - 1] += piece.text
+        mergedTexts[mergedLen - 1] += pieceText
       } else {
-        mergedTexts[mergedLen] = piece.text
-        mergedWordLike[mergedLen] = piece.isWordLike
-        mergedKinds[mergedLen] = piece.kind
-        mergedStarts[mergedLen] = piece.start
+        mergedTexts[mergedLen] = pieceText
+        mergedWordLike[mergedLen] = pieceWordLike
+        mergedKinds[mergedLen] = pieceKind
+        mergedStarts[mergedLen] = pieceStart
         mergedLen++
       }
-    }
+    })
   }
 
   for (let i = 1; i < mergedLen; i++) {
