@@ -39,11 +39,12 @@ type WhiteSpaceProfile = {
   preserveHardBreaks: boolean
 }
 
+// Pre-cached profiles — avoids allocating a new object per analyzeText() call.
+const WS_PROFILE_NORMAL: WhiteSpaceProfile = { mode: 'normal', preserveOrdinarySpaces: false, preserveHardBreaks: false }
+const WS_PROFILE_PRE_WRAP: WhiteSpaceProfile = { mode: 'pre-wrap', preserveOrdinarySpaces: true, preserveHardBreaks: true }
+
 function getWhiteSpaceProfile(whiteSpace?: WhiteSpaceMode): WhiteSpaceProfile {
-  const mode = whiteSpace ?? 'normal'
-  return mode === 'pre-wrap'
-    ? { mode, preserveOrdinarySpaces: true, preserveHardBreaks: true }
-    : { mode, preserveOrdinarySpaces: false, preserveHardBreaks: false }
+  return (whiteSpace ?? 'normal') === 'pre-wrap' ? WS_PROFILE_PRE_WRAP : WS_PROFILE_NORMAL
 }
 
 export function normalizeWhitespaceNormal(text: string): string {
@@ -415,14 +416,14 @@ function segmentNeedsSplitting(segment: string, whiteSpaceProfile: WhiteSpacePro
   return false
 }
 
-// Callback-based segment splitting — avoids allocating a pieces array + piece objects.
-// The callback receives (pieceText, pieceIsWordLike, pieceKind, pieceStart) for each sub-segment.
+// Segment splitting — emits pieces directly to a MergeBuilder.
+// Avoids allocating a pieces array + piece objects and function-call overhead for callbacks.
 function forEachBreakKindPiece(
   segment: string,
   isWordLike: boolean,
   start: number,
   whiteSpaceProfile: WhiteSpaceProfile,
-  callback: (text: string, isWordLike: boolean, kind: SegmentBreakKind, start: number) => void,
+  builder: MergeBuilder,
 ): void {
   let currentKind: SegmentBreakKind | null = null
   let runStart = 0
@@ -451,7 +452,7 @@ function forEachBreakKindPiece(
     }
 
     if (currentKind !== null) {
-      callback(segment.slice(runStart, i), currentWordLike, currentKind, currentStart)
+      builder.addPiece(segment.slice(runStart, i), currentWordLike, currentKind, currentStart)
     }
 
     currentKind = kind
@@ -462,7 +463,7 @@ function forEachBreakKindPiece(
   }
 
   if (currentKind !== null) {
-    callback(segment.slice(runStart), currentWordLike, currentKind!, currentStart)
+    builder.addPiece(segment.slice(runStart), currentWordLike, currentKind!, currentStart)
   }
 }
 
@@ -922,25 +923,30 @@ function carryTrailingForwardStickyAcrossCJKBoundaryInPlace(seg: MergedSegmentat
   }
 }
 
+// Reusable builder avoids closure allocation per buildMergedSegmentation call.
+// V8 sees a stable hidden class for the method dispatch.
+class MergeBuilder {
+  texts: string[] = []
+  isWordLike: boolean[] = []
+  kinds: SegmentBreakKind[] = []
+  starts: number[] = []
+  len = 0
+  carryCJK = false
 
-function buildMergedSegmentation(
-  normalized: string,
-  profile: AnalysisProfile,
-  whiteSpaceProfile: WhiteSpaceProfile,
-): MergedSegmentation {
-  const wordSegmenter = getSharedWordSegmenter()
-  const carryCJK = profile.carryCJKAfterClosingQuote
-  let mergedLen = 0
-  const mergedTexts: string[] = []
-  const mergedWordLike: boolean[] = []
-  const mergedKinds: SegmentBreakKind[] = []
-  const mergedStarts: number[] = []
+  reset(carryCJK: boolean): void {
+    this.texts.length = 0
+    this.isWordLike.length = 0
+    this.kinds.length = 0
+    this.starts.length = 0
+    this.len = 0
+    this.carryCJK = carryCJK
+  }
 
-  // Merge logic: called for each piece (either from fast path or forEachBreakKindPiece)
-  const mergePiece = (pieceText: string, pieceWordLike: boolean, pieceKind: SegmentBreakKind, pieceStart: number): void => {
+  addPiece(pieceText: string, pieceWordLike: boolean, pieceKind: SegmentBreakKind, pieceStart: number): void {
+    const len = this.len
     // Fast path: try to merge into previous text segment
-    if (pieceKind === 'text' && mergedLen > 0 && mergedKinds[mergedLen - 1] === 'text') {
-      const prevText = mergedTexts[mergedLen - 1]!
+    if (pieceKind === 'text' && len > 0 && this.kinds[len - 1] === 'text') {
+      const prevText = this.texts[len - 1]!
 
       if (pieceWordLike) {
         // Word-like text piece — check Arabic no-space punctuation merge
@@ -948,17 +954,17 @@ function buildMergedSegmentation(
           containsArabicScript(pieceText) &&
           endsWithArabicNoSpacePunctuation(prevText)
         ) {
-          mergedTexts[mergedLen - 1] += pieceText
-          mergedWordLike[mergedLen - 1] = true
+          this.texts[len - 1] += pieceText
+          this.isWordLike[len - 1] = true
           return
         }
       } else {
         // Non-word-like text piece — check left-sticky punctuation, repeated chars
         if (
           isLeftStickyPunctuationSegment(pieceText) ||
-          (pieceText === '-' && mergedWordLike[mergedLen - 1]!)
+          (pieceText === '-' && this.isWordLike[len - 1]!)
         ) {
-          mergedTexts[mergedLen - 1] += pieceText
+          this.texts[len - 1] += pieceText
           return
         }
         if (
@@ -967,7 +973,7 @@ function buildMergedSegmentation(
           pieceText !== '\u2014' &&
           isRepeatedSingleCharRun(prevText, pieceText)
         ) {
-          mergedTexts[mergedLen - 1] += pieceText
+          this.texts[len - 1] += pieceText
           return
         }
       }
@@ -977,49 +983,68 @@ function buildMergedSegmentation(
         isCJKLineStartProhibitedSegment(pieceText) &&
         isCJK(prevText)
       ) {
-        mergedTexts[mergedLen - 1] += pieceText
-        mergedWordLike[mergedLen - 1] = mergedWordLike[mergedLen - 1]! || pieceWordLike
+        this.texts[len - 1] += pieceText
+        this.isWordLike[len - 1] = this.isWordLike[len - 1]! || pieceWordLike
         return
       }
 
       // CJK after closing quote (Chromium profile only)
       if (
-        carryCJK &&
+        this.carryCJK &&
         isCJK(pieceText) &&
         isCJK(prevText) &&
         endsWithClosingQuote(prevText)
       ) {
-        mergedTexts[mergedLen - 1] += pieceText
-        mergedWordLike[mergedLen - 1] = mergedWordLike[mergedLen - 1]! || pieceWordLike
+        this.texts[len - 1] += pieceText
+        this.isWordLike[len - 1] = this.isWordLike[len - 1]! || pieceWordLike
         return
       }
 
       // Myanmar medial glue
       if (endsWithMyanmarMedialGlue(prevText)) {
-        mergedTexts[mergedLen - 1] += pieceText
-        mergedWordLike[mergedLen - 1] = mergedWordLike[mergedLen - 1]! || pieceWordLike
+        this.texts[len - 1] += pieceText
+        this.isWordLike[len - 1] = this.isWordLike[len - 1]! || pieceWordLike
         return
       }
     }
 
     // No merge — push new segment
-    mergedTexts[mergedLen] = pieceText
-    mergedWordLike[mergedLen] = pieceWordLike
-    mergedKinds[mergedLen] = pieceKind
-    mergedStarts[mergedLen] = pieceStart
-    mergedLen++
+    this.texts[len] = pieceText
+    this.isWordLike[len] = pieceWordLike
+    this.kinds[len] = pieceKind
+    this.starts[len] = pieceStart
+    this.len = len + 1
   }
+}
+
+// Module-level singleton — reused across calls.
+const mergeBuilder = new MergeBuilder()
+
+function buildMergedSegmentation(
+  normalized: string,
+  profile: AnalysisProfile,
+  whiteSpaceProfile: WhiteSpaceProfile,
+): MergedSegmentation {
+  const wordSegmenter = getSharedWordSegmenter()
+  const builder = mergeBuilder
+  builder.reset(profile.carryCJKAfterClosingQuote)
 
   for (const s of wordSegmenter.segment(normalized)) {
     const seg = s.segment
     const wordLike = s.isWordLike ?? false
     // Fast path: if segment has no special chars, emit as single 'text' piece
     if (!segmentNeedsSplitting(seg, whiteSpaceProfile)) {
-      mergePiece(seg, wordLike, 'text', s.index)
+      builder.addPiece(seg, wordLike, 'text', s.index)
     } else {
-      forEachBreakKindPiece(seg, wordLike, s.index, whiteSpaceProfile, mergePiece)
+      forEachBreakKindPiece(seg, wordLike, s.index, whiteSpaceProfile, builder)
     }
   }
+
+  const mergedTexts = builder.texts
+  const mergedWordLike = builder.isWordLike
+  const mergedKinds = builder.kinds
+  const mergedStarts = builder.starts
+  let mergedLen = builder.len
 
   for (let i = 1; i < mergedLen; i++) {
     if (
@@ -1059,17 +1084,18 @@ function buildMergedSegmentation(
     compactLen++
   }
 
-  mergedTexts.length = compactLen
-  mergedWordLike.length = compactLen
-  mergedKinds.length = compactLen
-  mergedStarts.length = compactLen
+  // Copy arrays out of the builder — the builder arrays are reused across calls
+  const outTexts = mergedTexts.slice(0, compactLen)
+  const outWordLike = mergedWordLike.slice(0, compactLen)
+  const outKinds = mergedKinds.slice(0, compactLen)
+  const outStarts = mergedStarts.slice(0, compactLen)
 
   const seg: MergedSegmentation = {
     len: compactLen,
-    texts: mergedTexts,
-    isWordLike: mergedWordLike,
-    kinds: mergedKinds,
-    starts: mergedStarts,
+    texts: outTexts,
+    isWordLike: outWordLike,
+    kinds: outKinds,
+    starts: outStarts,
   }
   mergeGlueConnectedTextRunsInPlace(seg)
   mergeUrlLikeRunsInPlace(seg)
@@ -1159,6 +1185,10 @@ export function analyzeText(
   return {
     normalized,
     chunks: compileAnalysisChunks(segmentation, whiteSpaceProfile),
-    ...segmentation,
+    len: segmentation.len,
+    texts: segmentation.texts,
+    isWordLike: segmentation.isWordLike,
+    kinds: segmentation.kinds,
+    starts: segmentation.starts,
   }
 }
