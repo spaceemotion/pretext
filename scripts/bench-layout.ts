@@ -13,6 +13,7 @@
 import { layout } from '../src/layout.ts'
 import type { PreparedText } from '../src/layout.ts'
 import type { SegmentBreakKind } from '../src/analysis.ts'
+import { walkPreparedLines, type PreparedLineBreakData, type InternalLayoutLine } from '../src/line-break.ts'
 
 // Seed a deterministic pseudo-random for reproducible benchmarks
 let seed = 42
@@ -277,7 +278,93 @@ for (const w of [200, 250, 300, 350, 400, 450, 500]) {
 }
 
 // Output JSON summary for easy diffing
-const summary = results.map(r => ({ label: r.label, medianNs: Math.round(r.medianNs), lineCount: r.lineCount }))
+const layoutSummary = results.map(r => ({ label: r.label, medianNs: Math.round(r.medianNs), lineCount: r.lineCount }))
 console.log()
-console.log('JSON summary:')
-console.log(JSON.stringify(summary, null, 2))
+console.log('JSON summary (layout):')
+console.log(JSON.stringify(layoutSummary, null, 2))
+
+// =============================================================================
+// walkPreparedLines benchmark (line-walking path used by layoutWithLines)
+// =============================================================================
+
+function runWalkBenchmark(
+  label: string,
+  prepared: PreparedText,
+  maxWidth: number,
+  iterations: number,
+  warmup: number,
+): { label: string; medianNs: number; p5Ns: number; p95Ns: number; opsPerSec: number; lineCount: number } {
+  const internalPrepared = prepared as unknown as PreparedLineBreakData
+
+  // Warmup
+  let sink = 0
+  for (let i = 0; i < warmup; i++) {
+    const n = walkPreparedLines(internalPrepared, maxWidth, (_line: InternalLayoutLine) => { sink++ })
+    sink += n
+  }
+
+  // Measure
+  const timings: number[] = []
+  for (let i = 0; i < iterations; i++) {
+    const t0 = performance.now()
+    for (let j = 0; j < 1000; j++) {
+      const n = walkPreparedLines(internalPrepared, maxWidth, (_line: InternalLayoutLine) => { sink++ })
+      sink += n
+    }
+    const elapsed = (performance.now() - t0) / 1000
+    timings.push(elapsed * 1e6)
+  }
+
+  if (sink < 0) console.log(sink)
+
+  let lineCount = 0
+  walkPreparedLines(internalPrepared, maxWidth, () => { lineCount++ })
+  const med = median(timings)
+
+  return {
+    label,
+    medianNs: med,
+    p5Ns: percentile(timings, 5),
+    p95Ns: percentile(timings, 95),
+    opsPerSec: Math.round(1e9 / med),
+    lineCount,
+  }
+}
+
+console.log()
+console.log()
+console.log('pretext walkPreparedLines() microbenchmark (line-walking path)')
+console.log('='.repeat(80))
+console.log(`Node ${process.version} | ${ITERATIONS} iterations × 1000 calls | ${WARMUP} warmup batches`)
+console.log()
+
+// Reuse the same cases for walk benchmarks
+const walkCases = [
+  { label: 'Walk: Latin short (6w)', prepared: cases[0]!.prepared, maxWidth: cases[0]!.maxWidth },
+  { label: 'Walk: Latin medium (25w)', prepared: cases[1]!.prepared, maxWidth: cases[1]!.maxWidth },
+  { label: 'Walk: Latin long (100w)', prepared: cases[2]!.prepared, maxWidth: cases[2]!.maxWidth },
+  { label: 'Walk: CJK medium (50ch)', prepared: cases[4]!.prepared, maxWidth: cases[4]!.maxWidth },
+  { label: 'Walk: Long word overflow', prepared: cases[5]!.prepared, maxWidth: cases[5]!.maxWidth },
+  { label: 'Walk: Corpus 500 segs', prepared: cases[6]!.prepared, maxWidth: cases[6]!.maxWidth },
+  { label: 'Walk: Magazine 2k segs', prepared: cases[7]!.prepared, maxWidth: cases[7]!.maxWidth },
+  { label: 'Walk: CJK editorial 5k', prepared: cases[8]!.prepared, maxWidth: cases[8]!.maxWidth },
+  { label: 'Walk: Thai-like 10k', prepared: cases[9]!.prepared, maxWidth: cases[9]!.maxWidth },
+  { label: 'Walk: Arabic-like 37k', prepared: cases[10]!.prepared, maxWidth: cases[10]!.maxWidth },
+  { label: 'Walk: Mixed long 10k', prepared: cases[11]!.prepared, maxWidth: cases[11]!.maxWidth },
+]
+
+const walkResults: { label: string; medianNs: number; lineCount: number }[] = []
+
+for (const c of walkCases) {
+  const r = runWalkBenchmark(c.label, c.prepared, c.maxWidth, ITERATIONS, WARMUP)
+  walkResults.push(r)
+  console.log(
+    `${r.label.padEnd(30)} ${(r.medianNs).toFixed(0).padStart(8)}ns median | ` +
+    `${r.p5Ns.toFixed(0).padStart(7)}ns p5 | ${r.p95Ns.toFixed(0).padStart(7)}ns p95 | ` +
+    `${(r.opsPerSec / 1e6).toFixed(2).padStart(6)}M ops/s | ${r.lineCount} lines`
+  )
+}
+
+console.log()
+console.log('JSON summary (walk):')
+console.log(JSON.stringify(walkResults.map(r => ({ label: r.label, medianNs: Math.round(r.medianNs), lineCount: r.lineCount })), null, 2))
