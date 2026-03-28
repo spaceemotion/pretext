@@ -368,6 +368,11 @@ class SimpleLineEngine {
     return this.finishLine()
   }
 
+  private clearPendingBreak(): void {
+    this.pendingBreakSegmentIndex = -1
+    this.pendingBreakPaintWidth = 0
+  }
+
   private emitCurrentLine(
     endSegmentIndex = this.lineEndSegmentIndex,
     endGraphemeIndex = this.lineEndGraphemeIndex,
@@ -383,8 +388,7 @@ class SimpleLineEngine {
     })
     this.lineW = 0
     this.hasContent = false
-    this.pendingBreakSegmentIndex = -1
-    this.pendingBreakPaintWidth = 0
+    this.clearPendingBreak()
   }
 
   private finishLine(
@@ -572,8 +576,8 @@ class FullLineEngine {
           continue
         }
 
-      const newW = this.lineW + w
-      if (newW > effectiveMaxWidth) {
+        const newW = this.lineW + w
+        if (newW > effectiveMaxWidth) {
           const currentBreakFitWidth = this.lineW + (kind === 'tab' ? 0 : lineEndFitAdvances[i]!)
           const currentBreakPaintWidth = this.lineW + (kind === 'tab' ? w : lineEndPaintAdvances[i]!)
 
@@ -665,10 +669,7 @@ class FullLineEngine {
     this.lineStartGraphemeIndex = normalizedStart.graphemeIndex
     this.lineEndSegmentIndex = normalizedStart.segmentIndex
     this.lineEndGraphemeIndex = normalizedStart.graphemeIndex
-    this.pendingBreakSegmentIndex = -1
-    this.pendingBreakFitWidth = 0
-    this.pendingBreakPaintWidth = 0
-    this.pendingBreakKind = null
+    this.clearPendingBreak()
 
     for (let i = normalizedStart.segmentIndex; i < chunk.endSegmentIndex; i++) {
       const kind = kinds[i]!
@@ -817,8 +818,8 @@ class FullLineEngine {
 
   private updatePendingBreakForWholeSegment(segmentIndex: number, segmentWidth: number): void {
     const { kinds, lineEndFitAdvances, lineEndPaintAdvances } = this.p
-    if (!canBreakAfter(kinds[segmentIndex]!)) return
     const kind = kinds[segmentIndex]!
+    if (!canBreakAfter(kind)) return
     const fitAdvance = kind === 'tab' ? 0 : lineEndFitAdvances[segmentIndex]!
     const paintAdvance = kind === 'tab' ? segmentWidth : lineEndPaintAdvances[segmentIndex]!
     this.pendingBreakSegmentIndex = segmentIndex + 1
@@ -866,7 +867,6 @@ class FullLineEngine {
   }
 
   private continueSoftHyphenBreakableSegment(segmentIndex: number): boolean {
-    if (this.pendingBreakKind !== 'soft-hyphen') return false
     const { breakableWidths, breakablePrefixWidths, discretionaryHyphenWidth } = this.p
     const gWidths = breakableWidths[segmentIndex]!
     if (gWidths === null) return false
@@ -954,7 +954,6 @@ class FullLineEngine {
       endGraphemeIndex: 0,
       width: 0,
     })
-    this.clearPendingBreak()
   }
 }
 

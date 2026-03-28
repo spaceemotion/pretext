@@ -343,3 +343,36 @@ Stream path (simple unchanged, full now uses `FullLineEngine.stepOne()`):
 | Stream-F: 10k (mixed) | 80,807 | 83,849 | neutral |
 
 **Result:** Performance-neutral across all paths. Class count reduced from 4 to 3, field count reduced from 58 to 44. File reduced by 85 lines. All 60 tests pass.
+
+---
+
+## Cleanup Loop 1: Indentation, consistency, and dead code
+
+Six targeted fixes in `src/line-break.ts` to improve readability and remove dead/inconsistent logic:
+
+1. **Fixed indentation bug** in `FullLineEngine.walkAll()`: `const newW` and `if (newW > effectiveMaxWidth)` were at 6-space indent instead of 8-space inside the `while` loop, making control flow visually misleading.
+
+2. **Eliminated double-read** of `kinds[segmentIndex]` in `FullLineEngine.updatePendingBreakForWholeSegment`: was reading the array once for `canBreakAfter()` then again for `const kind`. Now reads once and reuses.
+
+3. **Added `clearPendingBreak()` to `SimpleLineEngine`** for consistency with `FullLineEngine`. The inline resets in `emitCurrentLine` (`pendingBreakSegmentIndex = -1`, `pendingBreakPaintWidth = 0`) now use the method.
+
+4. **Used `clearPendingBreak()` in `FullLineEngine.stepOne()`**: was manually resetting 4 pending-break fields instead of calling the existing helper, inconsistent with `walkAll()` which uses the method.
+
+5. **Removed unreachable guard** in `FullLineEngine.continueSoftHyphenBreakableSegment`: checked `this.pendingBreakKind !== 'soft-hyphen'` but the only call site already guards `this.pendingBreakKind === 'soft-hyphen'`, making this always-false.
+
+6. **Removed redundant `clearPendingBreak()` in `emitEmptyChunk`**: pending break state is always cleared at chunk iteration start in `walkAll()`, so clearing again in `emitEmptyChunk` was dead work.
+
+**Benchmark:** Node v24.13.0, 50 iterations × 1000 calls, 20 warmup batches.
+
+| Case | Before (ns) | After (ns) | Change |
+|------|------------|-----------|--------|
+| Magazine 2k (layout) | 1,955 | 2,074 | noise |
+| Arabic 37k (layout) | 49,338 | 47,569 | noise |
+| Walk: Magazine 2k | 6,430 | 6,472 | neutral |
+| Walk: Arabic 37k | 113,861 | 113,478 | neutral |
+| Full: 2k (SHY+HB) | 8,437 | 8,462 | neutral |
+| Full: 10k (mixed) | 44,668 | 45,354 | neutral |
+| Stream-F: 2k (SHY+HB) | 12,922 | 15,070 | noise |
+| Stream-F: 10k (mixed) | 78,343 | 87,219 | noise |
+
+**Result:** Performance-neutral. All 60 tests pass. Code is more consistent and has no dead guards or redundant resets.
