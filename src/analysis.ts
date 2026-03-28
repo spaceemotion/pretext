@@ -308,11 +308,19 @@ function isEscapedQuoteClusterSegment(segment: string): boolean {
 }
 
 function splitTrailingForwardStickyCluster(text: string): { head: string, tail: string } | null {
-  const chars = Array.from(text)
-  let splitIndex = chars.length
+  let splitIndex = text.length
 
   while (splitIndex > 0) {
-    const ch = chars[splitIndex - 1]!
+    const code = text.charCodeAt(splitIndex - 1)
+    // Skip low surrogates — if previous char is a high surrogate, skip both
+    if (code >= 0xDC00 && code <= 0xDFFF && splitIndex >= 2) {
+      const hi = text.charCodeAt(splitIndex - 2)
+      if (hi >= 0xD800 && hi <= 0xDBFF) {
+        // This is an astral character — not a combining mark or kinsoku/glue char
+        break
+      }
+    }
+    const ch = text[splitIndex - 1]!
     if (isCombiningMark(ch)) {
       splitIndex--
       continue
@@ -324,10 +332,10 @@ function splitTrailingForwardStickyCluster(text: string): { head: string, tail: 
     break
   }
 
-  if (splitIndex <= 0 || splitIndex === chars.length) return null
+  if (splitIndex <= 0 || splitIndex === text.length) return null
   return {
-    head: chars.slice(0, splitIndex).join(''),
-    tail: chars.slice(splitIndex).join(''),
+    head: text.slice(0, splitIndex),
+    tail: text.slice(splitIndex),
   }
 }
 
@@ -352,7 +360,15 @@ function endsWithMyanmarMedialGlue(segment: string): boolean {
 function splitLeadingSpaceAndMarks(segment: string): { space: string, marks: string } | null {
   if (segment.length < 2 || segment[0] !== ' ') return null
   const marks = segment.slice(1)
-  if (/^\p{M}+$/u.test(marks)) {
+  // Check all characters are combining marks using fast isCombiningMark
+  let allMarks = true
+  for (let i = 0; i < marks.length; i++) {
+    if (!isCombiningMark(marks[i]!)) {
+      allMarks = false
+      break
+    }
+  }
+  if (allMarks) {
     return { space: ' ', marks }
   }
   return null
