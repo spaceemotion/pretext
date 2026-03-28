@@ -13,7 +13,7 @@
 import { layout } from '../src/layout.ts'
 import type { PreparedText } from '../src/layout.ts'
 import type { SegmentBreakKind } from '../src/analysis.ts'
-import { walkPreparedLines, type PreparedLineBreakData, type InternalLayoutLine } from '../src/line-break.ts'
+import { walkPreparedLines, layoutNextLineRange, type PreparedLineBreakData, type InternalLayoutLine, type LineBreakCursor } from '../src/line-break.ts'
 
 // Seed a deterministic pseudo-random for reproducible benchmarks
 let seed = 42
@@ -559,3 +559,114 @@ for (const c of fullCases) {
 console.log()
 console.log('JSON summary (full-path walk):')
 console.log(JSON.stringify(fullResults.map(r => ({ label: r.label, medianNs: Math.round(r.medianNs), lineCount: r.lineCount })), null, 2))
+
+// =============================================================================
+// layoutNextLineRange benchmark (streaming line-by-line API)
+// =============================================================================
+
+function runStreamBenchmark(
+  label: string,
+  prepared: PreparedText,
+  maxWidth: number,
+  iterations: number,
+  warmup: number,
+): { label: string; medianNs: number; p5Ns: number; p95Ns: number; opsPerSec: number; lineCount: number } {
+  const internalPrepared = prepared as unknown as PreparedLineBreakData
+
+  // Warmup — walk all lines via streaming API
+  let sink = 0
+  for (let i = 0; i < warmup; i++) {
+    let cursor: LineBreakCursor = { segmentIndex: 0, graphemeIndex: 0 }
+    let n = 0
+    while (true) {
+      const line = layoutNextLineRange(internalPrepared, cursor, maxWidth)
+      if (line === null) break
+      n++
+      cursor = { segmentIndex: line.endSegmentIndex, graphemeIndex: line.endGraphemeIndex }
+    }
+    sink += n
+  }
+
+  // Measure — full-text streaming walk per iteration batch
+  const timings: number[] = []
+  for (let i = 0; i < iterations; i++) {
+    const t0 = performance.now()
+    for (let j = 0; j < 1000; j++) {
+      let cursor: LineBreakCursor = { segmentIndex: 0, graphemeIndex: 0 }
+      while (true) {
+        const line = layoutNextLineRange(internalPrepared, cursor, maxWidth)
+        if (line === null) break
+        sink++
+        cursor = { segmentIndex: line.endSegmentIndex, graphemeIndex: line.endGraphemeIndex }
+      }
+    }
+    const elapsed = (performance.now() - t0) / 1000
+    timings.push(elapsed * 1e6)
+  }
+
+  if (sink < 0) console.log(sink)
+
+  // Count lines
+  let lineCount = 0
+  let cursor: LineBreakCursor = { segmentIndex: 0, graphemeIndex: 0 }
+  while (true) {
+    const line = layoutNextLineRange(internalPrepared, cursor, maxWidth)
+    if (line === null) break
+    lineCount++
+    cursor = { segmentIndex: line.endSegmentIndex, graphemeIndex: line.endGraphemeIndex }
+  }
+  const med = median(timings)
+
+  return {
+    label,
+    medianNs: med,
+    p5Ns: percentile(timings, 5),
+    p95Ns: percentile(timings, 95),
+    opsPerSec: Math.round(1e9 / med),
+    lineCount,
+  }
+}
+
+console.log()
+console.log()
+console.log('pretext layoutNextLineRange() microbenchmark (streaming API)')
+console.log('='.repeat(80))
+console.log(`Node ${process.version} | ${ITERATIONS} iterations × 1000 calls | ${WARMUP} warmup batches`)
+console.log()
+
+// Simple-path streaming cases
+const streamCases = [
+  { label: 'Stream: Latin short (6w)', prepared: cases[0]!.prepared, maxWidth: cases[0]!.maxWidth },
+  { label: 'Stream: Latin medium (25w)', prepared: cases[1]!.prepared, maxWidth: cases[1]!.maxWidth },
+  { label: 'Stream: Latin long (100w)', prepared: cases[2]!.prepared, maxWidth: cases[2]!.maxWidth },
+  { label: 'Stream: Corpus 500 segs', prepared: cases[6]!.prepared, maxWidth: cases[6]!.maxWidth },
+  { label: 'Stream: Magazine 2k segs', prepared: cases[7]!.prepared, maxWidth: cases[7]!.maxWidth },
+  { label: 'Stream: Mixed 10k segs', prepared: cases[11]!.prepared, maxWidth: cases[11]!.maxWidth },
+  // Full-path streaming
+  {
+    label: 'Stream-F: 2k (SHY+HB)',
+    prepared: makePreparedFull({ segmentCount: 2000, avgWordWidth: 42, spaceWidth: 4.4, maxWidth: 350, softHyphenRate: 0.1, hardBreakRate: 0.03 }),
+    maxWidth: 350,
+  },
+  {
+    label: 'Stream-F: 10k (mixed)',
+    prepared: makePreparedFull({ segmentCount: 10000, avgWordWidth: 30, spaceWidth: 4, maxWidth: 300, softHyphenRate: 0.08, hardBreakRate: 0.02, breakableRatio: 0.3 }),
+    maxWidth: 300,
+  },
+]
+
+const streamResults: { label: string; medianNs: number; lineCount: number }[] = []
+
+for (const c of streamCases) {
+  const r = runStreamBenchmark(c.label, c.prepared, c.maxWidth, ITERATIONS, WARMUP)
+  streamResults.push(r)
+  console.log(
+    `${r.label.padEnd(30)} ${(r.medianNs).toFixed(0).padStart(8)}ns median | ` +
+    `${r.p5Ns.toFixed(0).padStart(7)}ns p5 | ${r.p95Ns.toFixed(0).padStart(7)}ns p95 | ` +
+    `${(r.opsPerSec / 1e6).toFixed(2).padStart(6)}M ops/s | ${r.lineCount} lines`
+  )
+}
+
+console.log()
+console.log('JSON summary (stream):')
+console.log(JSON.stringify(streamResults.map(r => ({ label: r.label, medianNs: Math.round(r.medianNs), lineCount: r.lineCount })), null, 2))

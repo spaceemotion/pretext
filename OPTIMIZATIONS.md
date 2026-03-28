@@ -121,3 +121,25 @@ Priority order following the V8 optimization guide:
 | 10k segs (mixed) | 81,627 | 53,349 | **1.5×** |
 
 **Result: 1.5–9.7× faster** depending on text size. Similar pattern to Rounds 1–2: small texts gain more from eliminating per-call closure allocation. This was the most complex refactoring — 9 closures and soft-hyphen continuation logic. All 60 tests pass.
+
+### Round 4: Class-based refactoring of streaming API (`layoutNextLineRange`)
+
+**What:** Converted both `layoutNextLineRangeSimple` and `layoutNextLineRange` (full path) to `SimpleLineRangeStepper` and `FullLineRangeStepper` classes.
+- `layoutNextLineRangeSimple`: 5 closure variables → private fields; 5 nested closures → private methods; module-scope singleton
+- `layoutNextLineRange` (full path): 8+ closure variables → private fields; 7 nested closures → private methods; module-scope singleton
+- The streaming API was the worst-performing path (24× slower than walk at magazine scale) because each `layoutNextLineRange()` call created 5–7 fresh closures, and the function was called once per line
+
+**Benchmark:** Node v24.13.0, 50 iterations × 1000 calls, 20 warmup batches. This measures the full streaming loop: repeated `layoutNextLineRange()` calls until all lines are consumed.
+
+| Case | Before (ns) | After (ns) | Speedup |
+|------|------------|-----------|---------|
+| Latin short (6w) | 1,339 | 81 | **16.5×** |
+| Latin medium (25w) | 5,068 | 256 | **19.8×** |
+| Latin long (100w) | 16,671 | 1,071 | **15.6×** |
+| Corpus 500 segs | 43,228 | 2,773 | **15.6×** |
+| Magazine 2k segs | 175,504 | 8,117 | **21.6×** |
+| Mixed 10k segs | 720,503 | 37,738 | **19.1×** |
+| Full: 2k (SHY+HB) | 250,885 | 14,140 | **17.7×** |
+| Full: 10k (mixed) | 1,073,890 | 84,214 | **12.8×** |
+
+**Result: 12.8–21.6× faster** across all cases. The streaming API was by far the biggest win because the per-call closure overhead was multiplied by the number of lines in the text (138 closures × 5–7 each = ~800+ closure allocations for a magazine page). Now uses singleton class instances that reset state once at the start. Streaming is now within 1.1× of the walk path for the simple cases. All 60 tests pass.
