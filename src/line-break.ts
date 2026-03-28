@@ -32,13 +32,9 @@ export type InternalLayoutLine = {
 }
 
 function canBreakAfter(kind: SegmentBreakKind): boolean {
-  return (
-    kind === 'space' ||
-    kind === 'preserved-space' ||
-    kind === 'tab' ||
-    kind === 'zero-width-break' ||
-    kind === 'soft-hyphen'
-  )
+  // Negative check: 3 comparisons instead of 5.
+  // 'text' is the most common kind, so it short-circuits first.
+  return kind !== 'text' && kind !== 'glue' && kind !== 'hard-break'
 }
 
 
@@ -65,8 +61,7 @@ function getBreakableAdvance(
 function fitSoftHyphenBreak(
   graphemeWidths: number[],
   initialWidth: number,
-  maxWidth: number,
-  lineFitEpsilon: number,
+  effectiveMaxWidth: number,
   discretionaryHyphenWidth: number,
   cumulativeWidths: boolean,
 ): { fitCount: number, fittedWidth: number } {
@@ -80,7 +75,7 @@ function fitSoftHyphenBreak(
     const nextLineWidth = fitCount + 1 < graphemeWidths.length
       ? nextWidth + discretionaryHyphenWidth
       : nextWidth
-    if (nextLineWidth > maxWidth + lineFitEpsilon) break
+    if (nextLineWidth > effectiveMaxWidth) break
     fittedWidth = nextWidth
     fitCount++
   }
@@ -145,6 +140,7 @@ class SimpleLineCounter {
   private breakablePrefixWidths!: (number[] | null)[]
   private maxWidth = 0
   private lineFitEpsilon = 0
+  private effectiveMaxWidth = 0
   private preferPrefixWidths = false
 
   run(prepared: PreparedLineBreakData, maxWidth: number): number {
@@ -158,6 +154,7 @@ class SimpleLineCounter {
     this.breakablePrefixWidths = breakablePrefixWidths
     this.maxWidth = maxWidth
     this.lineFitEpsilon = engineProfile.lineFitEpsilon
+    this.effectiveMaxWidth = maxWidth + engineProfile.lineFitEpsilon
     this.preferPrefixWidths = engineProfile.preferPrefixWidthsForBreakableRuns
     this.lineCount = 0
     this.lineW = 0
@@ -167,7 +164,7 @@ class SimpleLineCounter {
     let lineW = 0
     let lineCount = 0
     let hasContent = false
-    const lineFitEpsilon = this.lineFitEpsilon
+    const effectiveMaxWidth = this.effectiveMaxWidth
 
     for (let i = 0; i < widths.length; i++) {
       const w = widths[i]!
@@ -187,7 +184,7 @@ class SimpleLineCounter {
       }
 
       const newW = lineW + w
-      if (newW > maxWidth + lineFitEpsilon) {
+      if (newW > effectiveMaxWidth) {
         if (kind === 'space') continue
         lineW = 0
         hasContent = false
@@ -216,13 +213,13 @@ class SimpleLineCounter {
     if (w > maxWidth && this.breakableWidths[segmentIndex] !== null) {
       const gWidths = this.breakableWidths[segmentIndex]!
       const gPrefixWidths = this.breakablePrefixWidths[segmentIndex] ?? null
-      const lineFitEpsilon = this.lineFitEpsilon
+      const effectiveMaxWidth = this.effectiveMaxWidth
       const preferPrefixWidths = this.preferPrefixWidths
       let lineW = 0
       let lineCount = this.lineCount
       for (let g = 0; g < gWidths.length; g++) {
         const gw = getBreakableAdvance(gWidths, gPrefixWidths, g, preferPrefixWidths)
-        if (lineW > 0 && lineW + gw > maxWidth + lineFitEpsilon) {
+        if (lineW > 0 && lineW + gw > effectiveMaxWidth) {
           lineCount++
           lineW = gw
         } else {
@@ -265,6 +262,7 @@ class SimpleLineWalker {
   private breakablePrefixWidths!: (number[] | null)[]
   private maxWidth = 0
   private lineFitEpsilon = 0
+  private effectiveMaxWidth = 0
   private preferPrefixWidths = false
   private onLine: ((line: InternalLayoutLine) => void) | undefined = undefined
 
@@ -284,6 +282,7 @@ class SimpleLineWalker {
     this.breakablePrefixWidths = breakablePrefixWidths
     this.maxWidth = maxWidth
     this.lineFitEpsilon = engineProfile.lineFitEpsilon
+    this.effectiveMaxWidth = maxWidth + engineProfile.lineFitEpsilon
     this.preferPrefixWidths = engineProfile.preferPrefixWidthsForBreakableRuns
     this.onLine = onLine
     this.lineCount = 0
@@ -296,7 +295,7 @@ class SimpleLineWalker {
     this.pendingBreakSegmentIndex = -1
     this.pendingBreakPaintWidth = 0
 
-    const lineFitEpsilon = this.lineFitEpsilon
+    const effectiveMaxWidth = this.effectiveMaxWidth
 
     let i = 0
     while (i < widths.length) {
@@ -315,7 +314,7 @@ class SimpleLineWalker {
       }
 
       const newW = this.lineW + w
-      if (newW > maxWidth + lineFitEpsilon) {
+      if (newW > effectiveMaxWidth) {
         if (canBreakAfter(kind)) {
           this.appendWholeSegment(i, w)
           this.emitCurrentLine(i + 1, 0, this.lineW - w)
@@ -404,8 +403,7 @@ class SimpleLineWalker {
   private appendBreakableSegmentFrom(segmentIndex: number, startGraphemeIdx: number): void {
     const gWidths = this.breakableWidths[segmentIndex]!
     const gPrefixWidths = this.breakablePrefixWidths[segmentIndex] ?? null
-    const maxWidth = this.maxWidth
-    const lineFitEpsilon = this.lineFitEpsilon
+    const effectiveMaxWidth = this.effectiveMaxWidth
     const preferPrefixWidths = this.preferPrefixWidths
 
     for (let g = startGraphemeIdx; g < gWidths.length; g++) {
@@ -416,7 +414,7 @@ class SimpleLineWalker {
         continue
       }
 
-      if (this.lineW + gw > maxWidth + lineFitEpsilon) {
+      if (this.lineW + gw > effectiveMaxWidth) {
         this.emitCurrentLine()
         this.startLineAtGrapheme(segmentIndex, g, gw)
       } else {
@@ -468,6 +466,7 @@ class FullLineWalker {
   private tabStopAdvance = 0
   private maxWidth = 0
   private lineFitEpsilon = 0
+  private effectiveMaxWidth = 0
   private preferPrefixWidths = false
   private preferEarlySoftHyphenBreak = false
   private onLine: ((line: InternalLayoutLine) => void) | undefined = undefined
@@ -502,12 +501,13 @@ class FullLineWalker {
     this.tabStopAdvance = tabStopAdvance
     this.maxWidth = maxWidth
     this.lineFitEpsilon = engineProfile.lineFitEpsilon
+    this.effectiveMaxWidth = maxWidth + engineProfile.lineFitEpsilon
     this.preferPrefixWidths = engineProfile.preferPrefixWidthsForBreakableRuns
     this.preferEarlySoftHyphenBreak = engineProfile.preferEarlySoftHyphenBreak
     this.onLine = onLine
     this.lineCount = 0
 
-    const lineFitEpsilon = this.lineFitEpsilon
+    const effectiveMaxWidth = this.effectiveMaxWidth
 
     for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
       const chunk = chunks[chunkIndex]!
@@ -553,15 +553,15 @@ class FullLineWalker {
           continue
         }
 
-        const newW = this.lineW + w
-        if (newW > maxWidth + lineFitEpsilon) {
+      const newW = this.lineW + w
+      if (newW > effectiveMaxWidth) {
           const currentBreakFitWidth = this.lineW + (kind === 'tab' ? 0 : lineEndFitAdvances[i]!)
           const currentBreakPaintWidth = this.lineW + (kind === 'tab' ? w : lineEndPaintAdvances[i]!)
 
           if (
             this.pendingBreakKind === 'soft-hyphen' &&
             this.preferEarlySoftHyphenBreak &&
-            this.pendingBreakFitWidth <= maxWidth + lineFitEpsilon
+            this.pendingBreakFitWidth <= effectiveMaxWidth
           ) {
             this.emitCurrentLine(this.pendingBreakSegmentIndex, 0, this.pendingBreakPaintWidth)
             continue
@@ -572,14 +572,14 @@ class FullLineWalker {
             continue
           }
 
-          if (canBreakAfter(kind) && currentBreakFitWidth <= maxWidth + lineFitEpsilon) {
+          if (canBreakAfter(kind) && currentBreakFitWidth <= effectiveMaxWidth) {
             this.appendWholeSegment(i, w)
             this.emitCurrentLine(i + 1, 0, currentBreakPaintWidth)
             i++
             continue
           }
 
-          if (this.pendingBreakSegmentIndex >= 0 && this.pendingBreakFitWidth <= maxWidth + lineFitEpsilon) {
+          if (this.pendingBreakSegmentIndex >= 0 && this.pendingBreakFitWidth <= effectiveMaxWidth) {
             this.emitCurrentLine(this.pendingBreakSegmentIndex, 0, this.pendingBreakPaintWidth)
             continue
           }
@@ -679,8 +679,7 @@ class FullLineWalker {
   private appendBreakableSegmentFrom(segmentIndex: number, startGraphemeIdx: number): void {
     const gWidths = this.breakableWidths[segmentIndex]!
     const gPrefixWidths = this.breakablePrefixWidths[segmentIndex] ?? null
-    const maxWidth = this.maxWidth
-    const lineFitEpsilon = this.lineFitEpsilon
+    const effectiveMaxWidth = this.effectiveMaxWidth
     const preferPrefixWidths = this.preferPrefixWidths
 
     for (let g = startGraphemeIdx; g < gWidths.length; g++) {
@@ -691,7 +690,7 @@ class FullLineWalker {
         continue
       }
 
-      if (this.lineW + gw > maxWidth + lineFitEpsilon) {
+      if (this.lineW + gw > effectiveMaxWidth) {
         this.emitCurrentLine()
         this.startLineAtGrapheme(segmentIndex, g, gw)
       } else {
@@ -718,8 +717,7 @@ class FullLineWalker {
     const { fitCount, fittedWidth } = fitSoftHyphenBreak(
       fitWidths,
       this.lineW,
-      this.maxWidth,
-      this.lineFitEpsilon,
+      this.effectiveMaxWidth,
       this.discretionaryHyphenWidth,
       usesPrefixWidths,
     )
@@ -795,6 +793,7 @@ class FullLineRangeStepper {
   private tabStopAdvance = 0
   private maxWidth = 0
   private lineFitEpsilon = 0
+  private effectiveMaxWidth = 0
   private preferPrefixWidths = false
   private preferEarlySoftHyphenBreak = false
 
@@ -839,6 +838,7 @@ class FullLineRangeStepper {
     this.tabStopAdvance = tabStopAdvance
     this.maxWidth = maxWidth
     this.lineFitEpsilon = engineProfile.lineFitEpsilon
+    this.effectiveMaxWidth = maxWidth + engineProfile.lineFitEpsilon
     this.preferPrefixWidths = engineProfile.preferPrefixWidthsForBreakableRuns
     this.preferEarlySoftHyphenBreak = engineProfile.preferEarlySoftHyphenBreak
     this.lineW = 0
@@ -852,7 +852,7 @@ class FullLineRangeStepper {
     this.pendingBreakPaintWidth = 0
     this.pendingBreakKind = null
 
-    const lineFitEpsilon = this.lineFitEpsilon
+    const effectiveMaxWidth = this.effectiveMaxWidth
 
     for (let i = normalizedStart.segmentIndex; i < chunk.endSegmentIndex; i++) {
       const kind = kinds[i]!
@@ -886,14 +886,14 @@ class FullLineRangeStepper {
       }
 
       const newW = this.lineW + w
-      if (newW > maxWidth + lineFitEpsilon) {
+      if (newW > effectiveMaxWidth) {
         const currentBreakFitWidth = this.lineW + (kind === 'tab' ? 0 : lineEndFitAdvances[i]!)
         const currentBreakPaintWidth = this.lineW + (kind === 'tab' ? w : lineEndPaintAdvances[i]!)
 
         if (
           this.pendingBreakKind === 'soft-hyphen' &&
           this.preferEarlySoftHyphenBreak &&
-          this.pendingBreakFitWidth <= maxWidth + lineFitEpsilon
+          this.pendingBreakFitWidth <= effectiveMaxWidth
         ) {
           return this.finishLine(this.pendingBreakSegmentIndex, 0, this.pendingBreakPaintWidth)
         }
@@ -901,12 +901,12 @@ class FullLineRangeStepper {
         const softBreakLine = this.maybeFinishAtSoftHyphen(i)
         if (softBreakLine !== null) return softBreakLine
 
-        if (canBreakAfter(kind) && currentBreakFitWidth <= maxWidth + lineFitEpsilon) {
+        if (canBreakAfter(kind) && currentBreakFitWidth <= effectiveMaxWidth) {
           this.appendWholeSegment(i, w)
           return this.finishLine(i + 1, 0, currentBreakPaintWidth)
         }
 
-        if (this.pendingBreakSegmentIndex >= 0 && this.pendingBreakFitWidth <= maxWidth + lineFitEpsilon) {
+        if (this.pendingBreakSegmentIndex >= 0 && this.pendingBreakFitWidth <= effectiveMaxWidth) {
           return this.finishLine(this.pendingBreakSegmentIndex, 0, this.pendingBreakPaintWidth)
         }
 
@@ -991,8 +991,7 @@ class FullLineRangeStepper {
   private appendBreakableSegmentFrom(segmentIndex: number, startGraphemeIdx: number): InternalLayoutLine | null {
     const gWidths = this.breakableWidths[segmentIndex]!
     const gPrefixWidths = this.breakablePrefixWidths[segmentIndex] ?? null
-    const maxWidth = this.maxWidth
-    const lineFitEpsilon = this.lineFitEpsilon
+    const effectiveMaxWidth = this.effectiveMaxWidth
     const preferPrefixWidths = this.preferPrefixWidths
 
     for (let g = startGraphemeIdx; g < gWidths.length; g++) {
@@ -1003,7 +1002,7 @@ class FullLineRangeStepper {
         continue
       }
 
-      if (this.lineW + gw > maxWidth + lineFitEpsilon) {
+      if (this.lineW + gw > effectiveMaxWidth) {
         return this.finishLine()
       }
 
@@ -1031,8 +1030,7 @@ class FullLineRangeStepper {
       const { fitCount, fittedWidth } = fitSoftHyphenBreak(
         fitWidths,
         this.lineW,
-        this.maxWidth,
-        this.lineFitEpsilon,
+        this.effectiveMaxWidth,
         this.discretionaryHyphenWidth,
         usesPrefixWidths,
       )
@@ -1096,6 +1094,7 @@ class SimpleLineRangeStepper {
   private breakablePrefixWidths!: (number[] | null)[]
   private maxWidth = 0
   private lineFitEpsilon = 0
+  private effectiveMaxWidth = 0
   private preferPrefixWidths = false
 
   run(
@@ -1112,6 +1111,7 @@ class SimpleLineRangeStepper {
     this.breakablePrefixWidths = breakablePrefixWidths
     this.maxWidth = maxWidth
     this.lineFitEpsilon = engineProfile.lineFitEpsilon
+    this.effectiveMaxWidth = maxWidth + engineProfile.lineFitEpsilon
     this.preferPrefixWidths = engineProfile.preferPrefixWidthsForBreakableRuns
     this.lineW = 0
     this.hasContent = false
@@ -1122,7 +1122,7 @@ class SimpleLineRangeStepper {
     this.pendingBreakSegmentIndex = -1
     this.pendingBreakPaintWidth = 0
 
-    const lineFitEpsilon = this.lineFitEpsilon
+    const effectiveMaxWidth = this.effectiveMaxWidth
 
     for (let i = normalizedStart.segmentIndex; i < widths.length; i++) {
       const w = widths[i]!
@@ -1144,7 +1144,7 @@ class SimpleLineRangeStepper {
       }
 
       const newW = this.lineW + w
-      if (newW > maxWidth + lineFitEpsilon) {
+      if (newW > effectiveMaxWidth) {
         if (canBreakAfter(kind)) {
           this.appendWholeSegment(i, w)
           return this.finishLine(i + 1, 0, this.lineW - w)
@@ -1219,8 +1219,7 @@ class SimpleLineRangeStepper {
   private appendBreakableSegmentFrom(segmentIndex: number, startGraphemeIdx: number): InternalLayoutLine | null {
     const gWidths = this.breakableWidths[segmentIndex]!
     const gPrefixWidths = this.breakablePrefixWidths[segmentIndex] ?? null
-    const maxWidth = this.maxWidth
-    const lineFitEpsilon = this.lineFitEpsilon
+    const effectiveMaxWidth = this.effectiveMaxWidth
     const preferPrefixWidths = this.preferPrefixWidths
 
     for (let g = startGraphemeIdx; g < gWidths.length; g++) {
@@ -1231,7 +1230,7 @@ class SimpleLineRangeStepper {
         continue
       }
 
-      if (this.lineW + gw > maxWidth + lineFitEpsilon) {
+      if (this.lineW + gw > effectiveMaxWidth) {
         return this.finishLine()
       }
 

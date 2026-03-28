@@ -143,3 +143,43 @@ Priority order following the V8 optimization guide:
 | Full: 10k (mixed) | 1,073,890 | 84,214 | **12.8×** |
 
 **Result: 12.8–21.6× faster** across all cases. The streaming API was by far the biggest win because the per-call closure overhead was multiplied by the number of lines in the text (138 closures × 5–7 each = ~800+ closure allocations for a magazine page). Now uses singleton class instances that reset state once at the start. Streaming is now within 1.1× of the walk path for the simple cases. All 60 tests pass.
+
+### Round 5: Pre-compute effectiveMaxWidth + optimize canBreakAfter
+
+**What:** Two micro-optimizations targeting the inner loop:
+1. **Pre-compute `effectiveMaxWidth = maxWidth + lineFitEpsilon`** once per `run()` call instead of computing the addition on every overflow check. Replaced 17 inline `maxWidth + lineFitEpsilon` expressions across all 6 classes.
+2. **Optimize `canBreakAfter()`** from 5 positive string comparisons to 3 negative comparisons. `kind !== 'text' && kind !== 'glue' && kind !== 'hard-break'` short-circuits on the first check for the most common 'text' kind.
+3. **Updated `fitSoftHyphenBreak()`** signature to accept pre-computed `effectiveMaxWidth` instead of separate `maxWidth + lineFitEpsilon` params.
+
+**Benchmark:** Node v24.13.0, 50 iterations × 1000 calls, 20 warmup batches.
+
+layout() path (SimpleLineCounter — tightest inner loop):
+
+| Case | Before (ns) | After (ns) | Speedup |
+|------|------------|-----------|---------|
+| Latin short (6w) | 35 | 33 | 6% |
+| Latin medium (25w) | 81 | 55 | **32%** |
+| Latin long (100w) | 239 | 204 | **15%** |
+| Corpus 500 segs | 703 | 563 | **20%** |
+| Magazine 2k segs | 2,904 | 2,423 | **17%** |
+| CJK editorial 5k | 7,809 | 6,664 | **15%** |
+| Thai 10k | 17,150 | 14,769 | **14%** |
+| Arabic 37k | 62,675 | 52,960 | **15%** |
+| Mixed 10k | 16,407 | 13,943 | **15%** |
+
+Full walk path (FullLineWalker):
+
+| Case | Before (ns) | After (ns) | Speedup |
+|------|------------|-----------|---------|
+| Full: 2k (SHY+HB) | 10,132 | 9,892 | 2% |
+| Full: 10k (mixed) | 54,805 | 48,924 | **11%** |
+
+Stream path:
+
+| Case | Before (ns) | After (ns) | Speedup |
+|------|------------|-----------|---------|
+| Stream: Magazine 2k | 8,117 | 7,432 | 8% |
+| Stream: Mixed 10k | 37,738 | 34,895 | 8% |
+| Stream-F: 10k | 84,214 | 80,557 | 4% |
+
+**Result: 4–32% faster** across paths. The layout() hot path benefits most (14–32%) because the inline addition was a significant fraction of per-segment work in the minimal `SimpleLineCounter` inner loop. Walk and stream paths see 2–11% gains. All 60 tests pass.
