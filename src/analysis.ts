@@ -98,8 +98,48 @@ const arabicScriptRe = /\p{Script=Arabic}/u
 const combiningMarkRe = /\p{M}/u
 const decimalDigitRe = /\p{Nd}/u
 
+// Fast charCode-based test for Arabic script characters.
+// Covers the main Arabic BMP blocks; avoids regex for common text.
+function isArabicScriptCharCode(c: number): boolean {
+  return (c >= 0x0600 && c <= 0x06FF) || // Arabic
+    (c >= 0x0750 && c <= 0x077F) || // Arabic Supplement
+    (c >= 0x08A0 && c <= 0x08FF) || // Arabic Extended-A
+    (c >= 0xFB50 && c <= 0xFDFF) || // Arabic Presentation Forms-A
+    (c >= 0xFE70 && c <= 0xFEFF) // Arabic Presentation Forms-B
+}
+
 function containsArabicScript(text: string): boolean {
-  return arabicScriptRe.test(text)
+  for (let i = 0; i < text.length; i++) {
+    if (isArabicScriptCharCode(text.charCodeAt(i))) return true
+  }
+  return false
+}
+
+// Fast charCode-based test for combining marks.
+// Covers the most common BMP combining mark ranges used in
+// Arabic, Devanagari, Thai, Myanmar, and Latin text.
+function isCombiningMark(ch: string): boolean {
+  const c = ch.charCodeAt(0)
+  // Fast path: most common combining mark ranges
+  if ((c >= 0x0300 && c <= 0x036F) || // Combining Diacritical Marks
+      (c >= 0x0610 && c <= 0x061A) || // Arabic combining above
+      (c >= 0x064B && c <= 0x065F) || // Arabic tashkeel
+      c === 0x0670 ||                  // Arabic superscript alef
+      (c >= 0x06D6 && c <= 0x06ED) || // Arabic extended combining
+      (c >= 0x0900 && c <= 0x0903) || // Devanagari combining
+      (c >= 0x093A && c <= 0x094F) || // Devanagari vowel signs
+      (c >= 0x0951 && c <= 0x0957) || // Devanagari stress marks
+      c === 0x0962 || c === 0x0963 || // Devanagari vowel sign vocalic
+      c === 0x0E31 ||                  // Thai combining
+      (c >= 0x0E34 && c <= 0x0E3A) || // Thai combining vowels
+      (c >= 0x0E47 && c <= 0x0E4E) || // Thai combining marks
+      c === 0x1039 || c === 0x103A || // Myanmar virama
+      (c >= 0x103B && c <= 0x103E) || // Myanmar medials
+      (c >= 0xFE20 && c <= 0xFE2F)) { // Combining Half Marks
+    return true
+  }
+  // Fallback to regex for rare/extended combining marks
+  return combiningMarkRe.test(ch)
 }
 
 export function isCJK(s: string): boolean {
@@ -237,7 +277,7 @@ function isLeftStickyPunctuationSegment(segment: string): boolean {
       sawPunctuation = true
       continue
     }
-    if (sawPunctuation && combiningMarkRe.test(ch)) continue
+    if (sawPunctuation && isCombiningMark(ch)) continue
     return false
   }
   return sawPunctuation
@@ -255,7 +295,7 @@ function isForwardStickyClusterSegment(segment: string): boolean {
   if (isEscapedQuoteClusterSegment(segment)) return true
   for (let i = 0; i < segment.length; i++) {
     const ch = segment[i]!
-    if (!kinsokuEnd.has(ch) && !forwardStickyGlue.has(ch) && !combiningMarkRe.test(ch)) return false
+    if (!kinsokuEnd.has(ch) && !forwardStickyGlue.has(ch) && !isCombiningMark(ch)) return false
   }
   return segment.length > 0
 }
@@ -264,7 +304,7 @@ function isEscapedQuoteClusterSegment(segment: string): boolean {
   let sawQuote = false
   for (let i = 0; i < segment.length; i++) {
     const ch = segment[i]!
-    if (ch === '\\' || combiningMarkRe.test(ch)) continue
+    if (ch === '\\' || isCombiningMark(ch)) continue
     if (kinsokuEnd.has(ch) || leftStickyPunctuation.has(ch) || forwardStickyGlue.has(ch)) {
       sawQuote = true
       continue
@@ -280,7 +320,7 @@ function splitTrailingForwardStickyCluster(text: string): { head: string, tail: 
 
   while (splitIndex > 0) {
     const ch = chars[splitIndex - 1]!
-    if (combiningMarkRe.test(ch)) {
+    if (isCombiningMark(ch)) {
       splitIndex--
       continue
     }
