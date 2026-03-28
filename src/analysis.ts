@@ -401,6 +401,20 @@ function classifySegmentBreakCharCode(code: number, whiteSpaceProfile: WhiteSpac
   return 'text'
 }
 
+// Fast check: does this segment contain any break-kind special characters?
+// If not, the whole segment is a single 'text' piece and forEachBreakKindPiece can be skipped.
+function segmentNeedsSplitting(segment: string, whiteSpaceProfile: WhiteSpaceProfile): boolean {
+  for (let i = 0; i < segment.length; i++) {
+    const c = segment.charCodeAt(i)
+    if (c === 0x20 || c === 0x09 || c === 0x0A ||  // space, tab, newline
+        c === 0x00A0 || c === 0x202F || c === 0x2060 || c === 0xFEFF ||  // NBSP, NNBSP, WJ, BOM
+        c === 0x200B || c === 0x00AD) {  // ZWSP, SHY
+      return true
+    }
+  }
+  return false
+}
+
 // Callback-based segment splitting — avoids allocating a pieces array + piece objects.
 // The callback receives (pieceText, pieceIsWordLike, pieceKind, pieceStart) for each sub-segment.
 function forEachBreakKindPiece(
@@ -922,79 +936,89 @@ function buildMergedSegmentation(
   const mergedKinds: SegmentBreakKind[] = []
   const mergedStarts: number[] = []
 
-  for (const s of wordSegmenter.segment(normalized)) {
-    forEachBreakKindPiece(s.segment, s.isWordLike ?? false, s.index, whiteSpaceProfile, (pieceText, pieceWordLike, pieceKind, pieceStart) => {
-      // Fast path: try to merge into previous text segment
-      if (pieceKind === 'text' && mergedLen > 0 && mergedKinds[mergedLen - 1] === 'text') {
-        const prevText = mergedTexts[mergedLen - 1]!
+  // Merge logic: called for each piece (either from fast path or forEachBreakKindPiece)
+  const mergePiece = (pieceText: string, pieceWordLike: boolean, pieceKind: SegmentBreakKind, pieceStart: number): void => {
+    // Fast path: try to merge into previous text segment
+    if (pieceKind === 'text' && mergedLen > 0 && mergedKinds[mergedLen - 1] === 'text') {
+      const prevText = mergedTexts[mergedLen - 1]!
 
-        if (pieceWordLike) {
-          // Word-like text piece — check Arabic no-space punctuation merge
-          if (
-            containsArabicScript(pieceText) &&
-            endsWithArabicNoSpacePunctuation(prevText)
-          ) {
-            mergedTexts[mergedLen - 1] += pieceText
-            mergedWordLike[mergedLen - 1] = true
-            return
-          }
-        } else {
-          // Non-word-like text piece — check left-sticky punctuation, repeated chars
-          if (
-            isLeftStickyPunctuationSegment(pieceText) ||
-            (pieceText === '-' && mergedWordLike[mergedLen - 1]!)
-          ) {
-            mergedTexts[mergedLen - 1] += pieceText
-            return
-          }
-          if (
-            pieceText.length === 1 &&
-            pieceText !== '-' &&
-            pieceText !== '\u2014' &&
-            isRepeatedSingleCharRun(prevText, pieceText)
-          ) {
-            mergedTexts[mergedLen - 1] += pieceText
-            return
-          }
-        }
-
-        // CJK kinsoku: line-start prohibited merge
+      if (pieceWordLike) {
+        // Word-like text piece — check Arabic no-space punctuation merge
         if (
-          isCJKLineStartProhibitedSegment(pieceText) &&
-          isCJK(prevText)
+          containsArabicScript(pieceText) &&
+          endsWithArabicNoSpacePunctuation(prevText)
         ) {
           mergedTexts[mergedLen - 1] += pieceText
-          mergedWordLike[mergedLen - 1] = mergedWordLike[mergedLen - 1]! || pieceWordLike
+          mergedWordLike[mergedLen - 1] = true
           return
         }
-
-        // CJK after closing quote (Chromium profile only)
+      } else {
+        // Non-word-like text piece — check left-sticky punctuation, repeated chars
         if (
-          carryCJK &&
-          isCJK(pieceText) &&
-          isCJK(prevText) &&
-          endsWithClosingQuote(prevText)
+          isLeftStickyPunctuationSegment(pieceText) ||
+          (pieceText === '-' && mergedWordLike[mergedLen - 1]!)
         ) {
           mergedTexts[mergedLen - 1] += pieceText
-          mergedWordLike[mergedLen - 1] = mergedWordLike[mergedLen - 1]! || pieceWordLike
           return
         }
-
-        // Myanmar medial glue
-        if (endsWithMyanmarMedialGlue(prevText)) {
+        if (
+          pieceText.length === 1 &&
+          pieceText !== '-' &&
+          pieceText !== '\u2014' &&
+          isRepeatedSingleCharRun(prevText, pieceText)
+        ) {
           mergedTexts[mergedLen - 1] += pieceText
-          mergedWordLike[mergedLen - 1] = mergedWordLike[mergedLen - 1]! || pieceWordLike
           return
         }
       }
 
-      // No merge — push new segment
-      mergedTexts[mergedLen] = pieceText
-      mergedWordLike[mergedLen] = pieceWordLike
-      mergedKinds[mergedLen] = pieceKind
-      mergedStarts[mergedLen] = pieceStart
-      mergedLen++
-    })
+      // CJK kinsoku: line-start prohibited merge
+      if (
+        isCJKLineStartProhibitedSegment(pieceText) &&
+        isCJK(prevText)
+      ) {
+        mergedTexts[mergedLen - 1] += pieceText
+        mergedWordLike[mergedLen - 1] = mergedWordLike[mergedLen - 1]! || pieceWordLike
+        return
+      }
+
+      // CJK after closing quote (Chromium profile only)
+      if (
+        carryCJK &&
+        isCJK(pieceText) &&
+        isCJK(prevText) &&
+        endsWithClosingQuote(prevText)
+      ) {
+        mergedTexts[mergedLen - 1] += pieceText
+        mergedWordLike[mergedLen - 1] = mergedWordLike[mergedLen - 1]! || pieceWordLike
+        return
+      }
+
+      // Myanmar medial glue
+      if (endsWithMyanmarMedialGlue(prevText)) {
+        mergedTexts[mergedLen - 1] += pieceText
+        mergedWordLike[mergedLen - 1] = mergedWordLike[mergedLen - 1]! || pieceWordLike
+        return
+      }
+    }
+
+    // No merge — push new segment
+    mergedTexts[mergedLen] = pieceText
+    mergedWordLike[mergedLen] = pieceWordLike
+    mergedKinds[mergedLen] = pieceKind
+    mergedStarts[mergedLen] = pieceStart
+    mergedLen++
+  }
+
+  for (const s of wordSegmenter.segment(normalized)) {
+    const seg = s.segment
+    const wordLike = s.isWordLike ?? false
+    // Fast path: if segment has no special chars, emit as single 'text' piece
+    if (!segmentNeedsSplitting(seg, whiteSpaceProfile)) {
+      mergePiece(seg, wordLike, 'text', s.index)
+    } else {
+      forEachBreakKindPiece(seg, wordLike, s.index, whiteSpaceProfile, mergePiece)
+    }
   }
 
   for (let i = 1; i < mergedLen; i++) {
