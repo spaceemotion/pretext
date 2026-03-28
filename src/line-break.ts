@@ -41,9 +41,6 @@ function canBreakAfter(kind: SegmentBreakKind): boolean {
   )
 }
 
-function isSimpleCollapsibleSpace(kind: SegmentBreakKind): boolean {
-  return kind === 'space'
-}
 
 function getTabAdvance(lineWidth: number, tabStopAdvance: number): number {
   if (tabStopAdvance <= 0) return 0
@@ -137,30 +134,94 @@ export function countPreparedLines(prepared: PreparedLineBreakData, maxWidth: nu
   return walkPreparedLines(prepared, maxWidth)
 }
 
-function countPreparedLinesSimple(prepared: PreparedLineBreakData, maxWidth: number): number {
-  const { widths, kinds, breakableWidths, breakablePrefixWidths } = prepared
-  if (widths.length === 0) return 0
+class SimpleLineCounter {
+  private lineCount = 0
+  private lineW = 0
+  private hasContent = false
 
-  const engineProfile = getEngineProfile()
-  const lineFitEpsilon = engineProfile.lineFitEpsilon
+  // Bound once per run — avoids repeated property access in tight loops
+  private widths!: number[]
+  private breakableWidths!: (number[] | null)[]
+  private breakablePrefixWidths!: (number[] | null)[]
+  private maxWidth = 0
+  private lineFitEpsilon = 0
+  private preferPrefixWidths = false
 
-  let lineCount = 0
-  let lineW = 0
-  let hasContent = false
+  run(prepared: PreparedLineBreakData, maxWidth: number): number {
+    const { widths, kinds, breakableWidths, breakablePrefixWidths } = prepared
+    if (widths.length === 0) return 0
 
-  function placeOnFreshLine(segmentIndex: number): void {
-    const w = widths[segmentIndex]!
-    if (w > maxWidth && breakableWidths[segmentIndex] !== null) {
-      const gWidths = breakableWidths[segmentIndex]!
-      const gPrefixWidths = breakablePrefixWidths[segmentIndex] ?? null
-      lineW = 0
+    const engineProfile = getEngineProfile()
+
+    this.widths = widths
+    this.breakableWidths = breakableWidths
+    this.breakablePrefixWidths = breakablePrefixWidths
+    this.maxWidth = maxWidth
+    this.lineFitEpsilon = engineProfile.lineFitEpsilon
+    this.preferPrefixWidths = engineProfile.preferPrefixWidthsForBreakableRuns
+    this.lineCount = 0
+    this.lineW = 0
+    this.hasContent = false
+
+    // Cache this.* in locals for the tight inner loop
+    let lineW = 0
+    let lineCount = 0
+    let hasContent = false
+    const lineFitEpsilon = this.lineFitEpsilon
+
+    for (let i = 0; i < widths.length; i++) {
+      const w = widths[i]!
+      const kind = kinds[i]!
+
+      if (!hasContent) {
+        // Sync state for placeOnFreshLine
+        this.lineW = lineW
+        this.lineCount = lineCount
+        this.hasContent = hasContent
+        this.placeOnFreshLine(i)
+        // Sync back
+        lineW = this.lineW
+        lineCount = this.lineCount
+        hasContent = this.hasContent
+        continue
+      }
+
+      const newW = lineW + w
+      if (newW > maxWidth + lineFitEpsilon) {
+        if (kind === 'space') continue
+        lineW = 0
+        hasContent = false
+        // Sync state for placeOnFreshLine
+        this.lineW = lineW
+        this.lineCount = lineCount
+        this.hasContent = hasContent
+        this.placeOnFreshLine(i)
+        // Sync back
+        lineW = this.lineW
+        lineCount = this.lineCount
+        hasContent = this.hasContent
+        continue
+      }
+
+      lineW = newW
+    }
+
+    if (!hasContent) return lineCount + 1
+    return lineCount
+  }
+
+  private placeOnFreshLine(segmentIndex: number): void {
+    const w = this.widths[segmentIndex]!
+    const maxWidth = this.maxWidth
+    if (w > maxWidth && this.breakableWidths[segmentIndex] !== null) {
+      const gWidths = this.breakableWidths[segmentIndex]!
+      const gPrefixWidths = this.breakablePrefixWidths[segmentIndex] ?? null
+      const lineFitEpsilon = this.lineFitEpsilon
+      const preferPrefixWidths = this.preferPrefixWidths
+      let lineW = 0
+      let lineCount = this.lineCount
       for (let g = 0; g < gWidths.length; g++) {
-        const gw = getBreakableAdvance(
-          gWidths,
-          gPrefixWidths,
-          g,
-          engineProfile.preferPrefixWidthsForBreakableRuns,
-        )
+        const gw = getBreakableAdvance(gWidths, gPrefixWidths, g, preferPrefixWidths)
         if (lineW > 0 && lineW + gw > maxWidth + lineFitEpsilon) {
           lineCount++
           lineW = gw
@@ -169,36 +230,20 @@ function countPreparedLinesSimple(prepared: PreparedLineBreakData, maxWidth: num
           lineW += gw
         }
       }
+      this.lineW = lineW
+      this.lineCount = lineCount
     } else {
-      lineW = w
-      lineCount++
+      this.lineW = w
+      this.lineCount++
     }
-    hasContent = true
+    this.hasContent = true
   }
+}
 
-  for (let i = 0; i < widths.length; i++) {
-    const w = widths[i]!
-    const kind = kinds[i]!
+const simpleLineCounter = new SimpleLineCounter()
 
-    if (!hasContent) {
-      placeOnFreshLine(i)
-      continue
-    }
-
-    const newW = lineW + w
-    if (newW > maxWidth + lineFitEpsilon) {
-      if (isSimpleCollapsibleSpace(kind)) continue
-      lineW = 0
-      hasContent = false
-      placeOnFreshLine(i)
-      continue
-    }
-
-    lineW = newW
-  }
-
-  if (!hasContent) return lineCount + 1
-  return lineCount
+function countPreparedLinesSimple(prepared: PreparedLineBreakData, maxWidth: number): number {
+  return simpleLineCounter.run(prepared, maxWidth)
 }
 
 function walkPreparedLinesSimple(
