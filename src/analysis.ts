@@ -937,6 +937,7 @@ function carryTrailingForwardStickyAcrossCJKBoundaryInPlace(seg: MergedSegmentat
 
 // Reusable builder avoids closure allocation per buildMergedSegmentation call.
 // V8 sees a stable hidden class for the method dispatch.
+// Content-presence flags allow skipping post-merge passes that can't fire.
 class MergeBuilder {
   texts: string[] = []
   isWordLike: boolean[] = []
@@ -944,6 +945,10 @@ class MergeBuilder {
   starts: number[] = []
   len = 0
   carryCJK = false
+  // Content-presence flags — set during addPiece, used to skip post-merge passes
+  hasGlue = false
+  hasCJK = false
+  hasArabicSpace = false
 
   reset(carryCJK: boolean): void {
     // Create fresh arrays — previous arrays are owned by the returned MergedSegmentation
@@ -953,10 +958,22 @@ class MergeBuilder {
     this.starts = []
     this.len = 0
     this.carryCJK = carryCJK
+    this.hasGlue = false
+    this.hasCJK = false
+    this.hasArabicSpace = false
   }
 
   addPiece(pieceText: string, pieceWordLike: boolean, pieceKind: SegmentBreakKind, pieceStart: number): void {
     const len = this.len
+
+    // Track content presence for post-merge pass skipping
+    if (pieceKind === 'glue') {
+      this.hasGlue = true
+    } else if (pieceKind === 'space' || pieceKind === 'preserved-space') {
+      // Track if we have space + following Arabic pattern
+      this.hasArabicSpace = true
+    }
+
     // Fast path: try to merge into previous text segment
     if (pieceKind === 'text' && len > 0 && this.kinds[len - 1] === 'text') {
       const prevText = this.texts[len - 1]!
@@ -998,6 +1015,7 @@ class MergeBuilder {
       ) {
         this.texts[len - 1] += pieceText
         this.isWordLike[len - 1] = this.isWordLike[len - 1]! || pieceWordLike
+        this.hasCJK = true
         return
       }
 
@@ -1010,6 +1028,7 @@ class MergeBuilder {
       ) {
         this.texts[len - 1] += pieceText
         this.isWordLike[len - 1] = this.isWordLike[len - 1]! || pieceWordLike
+        this.hasCJK = true
         return
       }
 
@@ -1111,30 +1130,34 @@ function buildMergedSegmentation(
     kinds: mergedKinds,
     starts: mergedStarts,
   }
-  mergeGlueConnectedTextRunsInPlace(seg)
+
+  // Skip post-merge passes that can't fire based on content-presence flags.
+  if (builder.hasGlue) mergeGlueConnectedTextRunsInPlace(seg)
   mergeUrlLikeRunsInPlace(seg)
   mergeUrlQueryRunsInPlace(seg)
   mergeNumericRunsInPlace(seg)
   splitHyphenatedNumericRunsInPlace(seg)
   mergeAsciiPunctuationChainsInPlace(seg)
-  carryTrailingForwardStickyAcrossCJKBoundaryInPlace(seg)
+  if (builder.hasCJK) carryTrailingForwardStickyAcrossCJKBoundaryInPlace(seg)
 
-  for (let i = 0; i < seg.len - 1; i++) {
-    const split = splitLeadingSpaceAndMarks(seg.texts[i]!)
-    if (split === null) continue
-    if (
-      (seg.kinds[i] !== 'space' && seg.kinds[i] !== 'preserved-space') ||
-      seg.kinds[i + 1] !== 'text' ||
-      !containsArabicScript(seg.texts[i + 1]!)
-    ) {
-      continue
+  if (builder.hasArabicSpace) {
+    for (let i = 0; i < seg.len - 1; i++) {
+      const split = splitLeadingSpaceAndMarks(seg.texts[i]!)
+      if (split === null) continue
+      if (
+        (seg.kinds[i] !== 'space' && seg.kinds[i] !== 'preserved-space') ||
+        seg.kinds[i + 1] !== 'text' ||
+        !containsArabicScript(seg.texts[i + 1]!)
+      ) {
+        continue
+      }
+
+      seg.texts[i] = split.space
+      seg.isWordLike[i] = false
+      seg.kinds[i] = seg.kinds[i] === 'preserved-space' ? 'preserved-space' : 'space'
+      seg.texts[i + 1] = split.marks + seg.texts[i + 1]!
+      seg.starts[i + 1] = seg.starts[i]! + split.space.length
     }
-
-    seg.texts[i] = split.space
-    seg.isWordLike[i] = false
-    seg.kinds[i] = seg.kinds[i] === 'preserved-space' ? 'preserved-space' : 'space'
-    seg.texts[i + 1] = split.marks + seg.texts[i + 1]!
-    seg.starts[i + 1] = seg.starts[i]! + split.space.length
   }
 
   return seg
