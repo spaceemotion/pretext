@@ -247,9 +247,7 @@ const arabicNoSpaceTrailingPunctuation = new Set([
   '\u061B',
 ])
 
-const myanmarMedialGlue = new Set([
-  '\u104F',
-])
+
 
 const closingQuoteChars = new Set([
   '”', '’', '»', '›',
@@ -263,7 +261,12 @@ const closingQuoteChars = new Set([
 ])
 
 function isLeftStickyPunctuationSegment(segment: string): boolean {
+  // Fast path: single-char punctuation (most common case)
+  if (segment.length === 1) return leftStickyPunctuation.has(segment)
+  if (segment.length === 0) return false
+  // Check for escaped quote cluster pattern
   if (isEscapedQuoteClusterSegment(segment)) return true
+  // Multi-char: all chars must be punctuation or combining marks after punctuation
   let sawPunctuation = false
   for (let i = 0; i < segment.length; i++) {
     const ch = segment[i]!
@@ -353,10 +356,6 @@ function endsWithArabicNoSpacePunctuation(segment: string): boolean {
   return arabicNoSpaceTrailingPunctuation.has(segment[segment.length - 1]!)
 }
 
-function endsWithMyanmarMedialGlue(segment: string): boolean {
-  if (segment.length === 0) return false
-  return myanmarMedialGlue.has(segment[segment.length - 1]!)
-}
 
 function splitLeadingSpaceAndMarks(segment: string): { space: string, marks: string } | null {
   if (segment.length < 2 || segment[0] !== ' ') return null
@@ -1000,8 +999,8 @@ class MergeBuilder {
         return
       }
 
-      // Myanmar medial glue
-      if (endsWithMyanmarMedialGlue(prevText)) {
+      // Myanmar medial glue — check last char code directly
+      if (prevText.charCodeAt(prevText.length - 1) === 0x104F) {
         this.texts[len - 1] += pieceText
         this.isWordLike[len - 1] = this.isWordLike[len - 1]! || pieceWordLike
         return
