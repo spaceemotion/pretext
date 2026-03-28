@@ -134,31 +134,16 @@ class SimpleLineCounter {
   private lineW = 0
   private hasContent = false
 
-  // Bound once per run — avoids repeated property access in tight loops
-  private widths!: number[]
-  private breakableWidths!: (number[] | null)[]
-  private breakablePrefixWidths!: (number[] | null)[]
-  private maxWidth = 0
-  private lineFitEpsilon = 0
-  private effectiveMaxWidth = 0
-  private preferPrefixWidths = false
+  constructor(
+    private readonly p: PreparedLineBreakData,
+    private readonly maxWidth: number,
+    private readonly effectiveMaxWidth: number,
+    private readonly preferPrefixWidths: boolean,
+  ) {}
 
-  run(prepared: PreparedLineBreakData, maxWidth: number): number {
-    const { widths, kinds, breakableWidths, breakablePrefixWidths } = prepared
+  run(): number {
+    const { widths, kinds } = this.p
     if (widths.length === 0) return 0
-
-    const engineProfile = getEngineProfile()
-
-    this.widths = widths
-    this.breakableWidths = breakableWidths
-    this.breakablePrefixWidths = breakablePrefixWidths
-    this.maxWidth = maxWidth
-    this.lineFitEpsilon = engineProfile.lineFitEpsilon
-    this.effectiveMaxWidth = maxWidth + engineProfile.lineFitEpsilon
-    this.preferPrefixWidths = engineProfile.preferPrefixWidthsForBreakableRuns
-    this.lineCount = 0
-    this.lineW = 0
-    this.hasContent = false
 
     // Cache this.* in locals for the tight inner loop
     let lineW = 0
@@ -208,11 +193,12 @@ class SimpleLineCounter {
   }
 
   private placeOnFreshLine(segmentIndex: number): void {
-    const w = this.widths[segmentIndex]!
+    const { widths, breakableWidths, breakablePrefixWidths } = this.p
+    const w = widths[segmentIndex]!
     const maxWidth = this.maxWidth
-    if (w > maxWidth && this.breakableWidths[segmentIndex] !== null) {
-      const gWidths = this.breakableWidths[segmentIndex]!
-      const gPrefixWidths = this.breakablePrefixWidths[segmentIndex] ?? null
+    if (w > maxWidth && breakableWidths[segmentIndex] !== null) {
+      const gWidths = breakableWidths[segmentIndex]!
+      const gPrefixWidths = breakablePrefixWidths[segmentIndex] ?? null
       const effectiveMaxWidth = this.effectiveMaxWidth
       const preferPrefixWidths = this.preferPrefixWidths
       let lineW = 0
@@ -237,10 +223,11 @@ class SimpleLineCounter {
   }
 }
 
-const simpleLineCounter = new SimpleLineCounter()
-
 function countPreparedLinesSimple(prepared: PreparedLineBreakData, maxWidth: number): number {
-  return simpleLineCounter.run(prepared, maxWidth)
+  const ep = getEngineProfile()
+  return new SimpleLineCounter(
+    prepared, maxWidth, maxWidth + ep.lineFitEpsilon, ep.preferPrefixWidthsForBreakableRuns,
+  ).run()
 }
 
 class SimpleLineWalker {
@@ -255,46 +242,19 @@ class SimpleLineWalker {
   private pendingBreakSegmentIndex = -1
   private pendingBreakPaintWidth = 0
 
-  // Bound once per run
-  private widths!: number[]
-  private kinds!: SegmentBreakKind[]
-  private breakableWidths!: (number[] | null)[]
-  private breakablePrefixWidths!: (number[] | null)[]
-  private maxWidth = 0
-  private lineFitEpsilon = 0
-  private effectiveMaxWidth = 0
-  private preferPrefixWidths = false
-  private onLine: ((line: InternalLayoutLine) => void) | undefined = undefined
+  constructor(
+    private readonly p: PreparedLineBreakData,
+    private readonly maxWidth: number,
+    private readonly effectiveMaxWidth: number,
+    private readonly preferPrefixWidths: boolean,
+    private readonly onLine: ((line: InternalLayoutLine) => void) | undefined,
+  ) {}
 
-  run(
-    prepared: PreparedLineBreakData,
-    maxWidth: number,
-    onLine?: (line: InternalLayoutLine) => void,
-  ): number {
-    const { widths, kinds, breakableWidths, breakablePrefixWidths } = prepared
+  run(): number {
+    const { widths, kinds, breakableWidths } = this.p
     if (widths.length === 0) return 0
 
-    const engineProfile = getEngineProfile()
-
-    this.widths = widths
-    this.kinds = kinds
-    this.breakableWidths = breakableWidths
-    this.breakablePrefixWidths = breakablePrefixWidths
-    this.maxWidth = maxWidth
-    this.lineFitEpsilon = engineProfile.lineFitEpsilon
-    this.effectiveMaxWidth = maxWidth + engineProfile.lineFitEpsilon
-    this.preferPrefixWidths = engineProfile.preferPrefixWidthsForBreakableRuns
-    this.onLine = onLine
-    this.lineCount = 0
-    this.lineW = 0
-    this.hasContent = false
-    this.lineStartSegmentIndex = 0
-    this.lineStartGraphemeIndex = 0
-    this.lineEndSegmentIndex = 0
-    this.lineEndGraphemeIndex = 0
-    this.pendingBreakSegmentIndex = -1
-    this.pendingBreakPaintWidth = 0
-
+    const maxWidth = this.maxWidth
     const effectiveMaxWidth = this.effectiveMaxWidth
 
     let i = 0
@@ -395,14 +355,15 @@ class SimpleLineWalker {
   }
 
   private updatePendingBreak(segmentIndex: number, segmentWidth: number): void {
-    if (!canBreakAfter(this.kinds[segmentIndex]!)) return
+    if (!canBreakAfter(this.p.kinds[segmentIndex]!)) return
     this.pendingBreakSegmentIndex = segmentIndex + 1
     this.pendingBreakPaintWidth = this.lineW - segmentWidth
   }
 
   private appendBreakableSegmentFrom(segmentIndex: number, startGraphemeIdx: number): void {
-    const gWidths = this.breakableWidths[segmentIndex]!
-    const gPrefixWidths = this.breakablePrefixWidths[segmentIndex] ?? null
+    const { breakableWidths, breakablePrefixWidths } = this.p
+    const gWidths = breakableWidths[segmentIndex]!
+    const gPrefixWidths = breakablePrefixWidths[segmentIndex] ?? null
     const effectiveMaxWidth = this.effectiveMaxWidth
     const preferPrefixWidths = this.preferPrefixWidths
 
@@ -431,14 +392,15 @@ class SimpleLineWalker {
   }
 }
 
-const simpleLineWalker = new SimpleLineWalker()
-
 function walkPreparedLinesSimple(
   prepared: PreparedLineBreakData,
   maxWidth: number,
   onLine?: (line: InternalLayoutLine) => void,
 ): number {
-  return simpleLineWalker.run(prepared, maxWidth, onLine)
+  const ep = getEngineProfile()
+  return new SimpleLineWalker(
+    prepared, maxWidth, maxWidth + ep.lineFitEpsilon, ep.preferPrefixWidthsForBreakableRuns, onLine,
+  ).run()
 }
 
 class FullLineWalker {
@@ -455,58 +417,29 @@ class FullLineWalker {
   private pendingBreakPaintWidth = 0
   private pendingBreakKind: SegmentBreakKind | null = null
 
-  // Bound once per run
-  private widths!: number[]
-  private lineEndFitAdvances!: number[]
-  private lineEndPaintAdvances!: number[]
-  private kinds!: SegmentBreakKind[]
-  private breakableWidths!: (number[] | null)[]
-  private breakablePrefixWidths!: (number[] | null)[]
-  private discretionaryHyphenWidth = 0
-  private tabStopAdvance = 0
-  private maxWidth = 0
-  private lineFitEpsilon = 0
-  private effectiveMaxWidth = 0
-  private preferPrefixWidths = false
-  private preferEarlySoftHyphenBreak = false
-  private onLine: ((line: InternalLayoutLine) => void) | undefined = undefined
+  constructor(
+    private readonly p: PreparedLineBreakData,
+    private readonly maxWidth: number,
+    private readonly effectiveMaxWidth: number,
+    private readonly preferPrefixWidths: boolean,
+    private readonly preferEarlySoftHyphenBreak: boolean,
+    private readonly onLine: ((line: InternalLayoutLine) => void) | undefined,
+  ) {}
 
-  run(
-    prepared: PreparedLineBreakData,
-    maxWidth: number,
-    onLine?: (line: InternalLayoutLine) => void,
-  ): number {
+  run(): number {
     const {
       widths,
       lineEndFitAdvances,
       lineEndPaintAdvances,
       kinds,
       breakableWidths,
-      breakablePrefixWidths,
       discretionaryHyphenWidth,
       tabStopAdvance,
       chunks,
-    } = prepared
+    } = this.p
     if (widths.length === 0 || chunks.length === 0) return 0
 
-    const engineProfile = getEngineProfile()
-
-    this.widths = widths
-    this.lineEndFitAdvances = lineEndFitAdvances
-    this.lineEndPaintAdvances = lineEndPaintAdvances
-    this.kinds = kinds
-    this.breakableWidths = breakableWidths
-    this.breakablePrefixWidths = breakablePrefixWidths
-    this.discretionaryHyphenWidth = discretionaryHyphenWidth
-    this.tabStopAdvance = tabStopAdvance
-    this.maxWidth = maxWidth
-    this.lineFitEpsilon = engineProfile.lineFitEpsilon
-    this.effectiveMaxWidth = maxWidth + engineProfile.lineFitEpsilon
-    this.preferPrefixWidths = engineProfile.preferPrefixWidthsForBreakableRuns
-    this.preferEarlySoftHyphenBreak = engineProfile.preferEarlySoftHyphenBreak
-    this.onLine = onLine
-    this.lineCount = 0
-
+    const maxWidth = this.maxWidth
     const effectiveMaxWidth = this.effectiveMaxWidth
 
     for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
@@ -666,10 +599,11 @@ class FullLineWalker {
   }
 
   private updatePendingBreakForWholeSegment(segmentIndex: number, segmentWidth: number): void {
-    if (!canBreakAfter(this.kinds[segmentIndex]!)) return
-    const kind = this.kinds[segmentIndex]!
-    const fitAdvance = kind === 'tab' ? 0 : this.lineEndFitAdvances[segmentIndex]!
-    const paintAdvance = kind === 'tab' ? segmentWidth : this.lineEndPaintAdvances[segmentIndex]!
+    const { kinds, lineEndFitAdvances, lineEndPaintAdvances } = this.p
+    if (!canBreakAfter(kinds[segmentIndex]!)) return
+    const kind = kinds[segmentIndex]!
+    const fitAdvance = kind === 'tab' ? 0 : lineEndFitAdvances[segmentIndex]!
+    const paintAdvance = kind === 'tab' ? segmentWidth : lineEndPaintAdvances[segmentIndex]!
     this.pendingBreakSegmentIndex = segmentIndex + 1
     this.pendingBreakFitWidth = this.lineW - segmentWidth + fitAdvance
     this.pendingBreakPaintWidth = this.lineW - segmentWidth + paintAdvance
@@ -677,8 +611,9 @@ class FullLineWalker {
   }
 
   private appendBreakableSegmentFrom(segmentIndex: number, startGraphemeIdx: number): void {
-    const gWidths = this.breakableWidths[segmentIndex]!
-    const gPrefixWidths = this.breakablePrefixWidths[segmentIndex] ?? null
+    const { breakableWidths, breakablePrefixWidths } = this.p
+    const gWidths = breakableWidths[segmentIndex]!
+    const gPrefixWidths = breakablePrefixWidths[segmentIndex] ?? null
     const effectiveMaxWidth = this.effectiveMaxWidth
     const preferPrefixWidths = this.preferPrefixWidths
 
@@ -708,17 +643,18 @@ class FullLineWalker {
 
   private continueSoftHyphenBreakableSegment(segmentIndex: number): boolean {
     if (this.pendingBreakKind !== 'soft-hyphen') return false
-    const gWidths = this.breakableWidths[segmentIndex]!
+    const { breakableWidths, breakablePrefixWidths, discretionaryHyphenWidth } = this.p
+    const gWidths = breakableWidths[segmentIndex]!
     if (gWidths === null) return false
     const fitWidths = this.preferPrefixWidths
-      ? this.breakablePrefixWidths[segmentIndex] ?? gWidths
+      ? breakablePrefixWidths[segmentIndex] ?? gWidths
       : gWidths
     const usesPrefixWidths = fitWidths !== gWidths
     const { fitCount, fittedWidth } = fitSoftHyphenBreak(
       fitWidths,
       this.lineW,
       this.effectiveMaxWidth,
-      this.discretionaryHyphenWidth,
+      discretionaryHyphenWidth,
       usesPrefixWidths,
     )
     if (fitCount === 0) return false
@@ -737,7 +673,7 @@ class FullLineWalker {
     this.emitCurrentLine(
       segmentIndex,
       fitCount,
-      fittedWidth + this.discretionaryHyphenWidth,
+      fittedWidth + discretionaryHyphenWidth,
     )
     this.appendBreakableSegmentFrom(segmentIndex, fitCount)
     return true
@@ -756,8 +692,6 @@ class FullLineWalker {
   }
 }
 
-const fullLineWalker = new FullLineWalker()
-
 export function walkPreparedLines(
   prepared: PreparedLineBreakData,
   maxWidth: number,
@@ -766,7 +700,11 @@ export function walkPreparedLines(
   if (prepared.simpleLineWalkFastPath) {
     return walkPreparedLinesSimple(prepared, maxWidth, onLine)
   }
-  return fullLineWalker.run(prepared, maxWidth, onLine)
+  const ep = getEngineProfile()
+  return new FullLineWalker(
+    prepared, maxWidth, maxWidth + ep.lineFitEpsilon,
+    ep.preferPrefixWidthsForBreakableRuns, ep.preferEarlySoftHyphenBreak, onLine,
+  ).run()
 }
 
 class FullLineRangeStepper {
@@ -782,30 +720,19 @@ class FullLineRangeStepper {
   private pendingBreakPaintWidth = 0
   private pendingBreakKind: SegmentBreakKind | null = null
 
-  // Bound once per run
-  private widths!: number[]
-  private lineEndFitAdvances!: number[]
-  private lineEndPaintAdvances!: number[]
-  private kinds!: SegmentBreakKind[]
-  private breakableWidths!: (number[] | null)[]
-  private breakablePrefixWidths!: (number[] | null)[]
-  private discretionaryHyphenWidth = 0
-  private tabStopAdvance = 0
-  private maxWidth = 0
-  private lineFitEpsilon = 0
-  private effectiveMaxWidth = 0
-  private preferPrefixWidths = false
-  private preferEarlySoftHyphenBreak = false
+  constructor(
+    private readonly p: PreparedLineBreakData,
+    private readonly maxWidth: number,
+    private readonly effectiveMaxWidth: number,
+    private readonly preferPrefixWidths: boolean,
+    private readonly preferEarlySoftHyphenBreak: boolean,
+  ) {}
 
-  run(
-    prepared: PreparedLineBreakData,
-    normalizedStart: LineBreakCursor,
-    maxWidth: number,
-  ): InternalLayoutLine | null {
-    const chunkIndex = findChunkIndexForStart(prepared, normalizedStart.segmentIndex)
+  run(normalizedStart: LineBreakCursor): InternalLayoutLine | null {
+    const chunkIndex = findChunkIndexForStart(this.p, normalizedStart.segmentIndex)
     if (chunkIndex < 0) return null
 
-    const chunk = prepared.chunks[chunkIndex]!
+    const chunk = this.p.chunks[chunkIndex]!
     if (chunk.startSegmentIndex === chunk.endSegmentIndex) {
       return {
         startSegmentIndex: chunk.startSegmentIndex,
@@ -822,25 +749,12 @@ class FullLineRangeStepper {
       lineEndPaintAdvances,
       kinds,
       breakableWidths,
-      breakablePrefixWidths,
       discretionaryHyphenWidth,
       tabStopAdvance,
-    } = prepared
-    const engineProfile = getEngineProfile()
+    } = this.p
+    const maxWidth = this.maxWidth
+    const effectiveMaxWidth = this.effectiveMaxWidth
 
-    this.widths = widths
-    this.lineEndFitAdvances = lineEndFitAdvances
-    this.lineEndPaintAdvances = lineEndPaintAdvances
-    this.kinds = kinds
-    this.breakableWidths = breakableWidths
-    this.breakablePrefixWidths = breakablePrefixWidths
-    this.discretionaryHyphenWidth = discretionaryHyphenWidth
-    this.tabStopAdvance = tabStopAdvance
-    this.maxWidth = maxWidth
-    this.lineFitEpsilon = engineProfile.lineFitEpsilon
-    this.effectiveMaxWidth = maxWidth + engineProfile.lineFitEpsilon
-    this.preferPrefixWidths = engineProfile.preferPrefixWidthsForBreakableRuns
-    this.preferEarlySoftHyphenBreak = engineProfile.preferEarlySoftHyphenBreak
     this.lineW = 0
     this.hasContent = false
     this.lineStartSegmentIndex = normalizedStart.segmentIndex
@@ -851,8 +765,6 @@ class FullLineRangeStepper {
     this.pendingBreakFitWidth = 0
     this.pendingBreakPaintWidth = 0
     this.pendingBreakKind = null
-
-    const effectiveMaxWidth = this.effectiveMaxWidth
 
     for (let i = normalizedStart.segmentIndex; i < chunk.endSegmentIndex; i++) {
       const kind = kinds[i]!
@@ -978,10 +890,11 @@ class FullLineRangeStepper {
   }
 
   private updatePendingBreakForWholeSegment(segmentIndex: number, segmentWidth: number): void {
-    if (!canBreakAfter(this.kinds[segmentIndex]!)) return
-    const kind = this.kinds[segmentIndex]!
-    const fitAdvance = kind === 'tab' ? 0 : this.lineEndFitAdvances[segmentIndex]!
-    const paintAdvance = kind === 'tab' ? segmentWidth : this.lineEndPaintAdvances[segmentIndex]!
+    const { kinds, lineEndFitAdvances, lineEndPaintAdvances } = this.p
+    if (!canBreakAfter(kinds[segmentIndex]!)) return
+    const kind = kinds[segmentIndex]!
+    const fitAdvance = kind === 'tab' ? 0 : lineEndFitAdvances[segmentIndex]!
+    const paintAdvance = kind === 'tab' ? segmentWidth : lineEndPaintAdvances[segmentIndex]!
     this.pendingBreakSegmentIndex = segmentIndex + 1
     this.pendingBreakFitWidth = this.lineW - segmentWidth + fitAdvance
     this.pendingBreakPaintWidth = this.lineW - segmentWidth + paintAdvance
@@ -989,8 +902,9 @@ class FullLineRangeStepper {
   }
 
   private appendBreakableSegmentFrom(segmentIndex: number, startGraphemeIdx: number): InternalLayoutLine | null {
-    const gWidths = this.breakableWidths[segmentIndex]!
-    const gPrefixWidths = this.breakablePrefixWidths[segmentIndex] ?? null
+    const { breakableWidths, breakablePrefixWidths } = this.p
+    const gWidths = breakableWidths[segmentIndex]!
+    const gPrefixWidths = breakablePrefixWidths[segmentIndex] ?? null
     const effectiveMaxWidth = this.effectiveMaxWidth
     const preferPrefixWidths = this.preferPrefixWidths
 
@@ -1021,17 +935,18 @@ class FullLineRangeStepper {
   private maybeFinishAtSoftHyphen(segmentIndex: number): InternalLayoutLine | null {
     if (this.pendingBreakKind !== 'soft-hyphen' || this.pendingBreakSegmentIndex < 0) return null
 
-    const gWidths = this.breakableWidths[segmentIndex] ?? null
+    const { breakableWidths, breakablePrefixWidths, discretionaryHyphenWidth } = this.p
+    const gWidths = breakableWidths[segmentIndex] ?? null
     if (gWidths !== null) {
       const fitWidths = this.preferPrefixWidths
-        ? this.breakablePrefixWidths[segmentIndex] ?? gWidths
+        ? breakablePrefixWidths[segmentIndex] ?? gWidths
         : gWidths
       const usesPrefixWidths = fitWidths !== gWidths
       const { fitCount, fittedWidth } = fitSoftHyphenBreak(
         fitWidths,
         this.lineW,
         this.effectiveMaxWidth,
-        this.discretionaryHyphenWidth,
+        discretionaryHyphenWidth,
         usesPrefixWidths,
       )
 
@@ -1047,20 +962,18 @@ class FullLineRangeStepper {
         return this.finishLine(
           segmentIndex,
           fitCount,
-          fittedWidth + this.discretionaryHyphenWidth,
+          fittedWidth + discretionaryHyphenWidth,
         )
       }
     }
 
-    if (this.pendingBreakFitWidth <= this.maxWidth + this.lineFitEpsilon) {
+    if (this.pendingBreakFitWidth <= this.effectiveMaxWidth) {
       return this.finishLine(this.pendingBreakSegmentIndex, 0, this.pendingBreakPaintWidth)
     }
 
     return null
   }
 }
-
-const fullLineRangeStepper = new FullLineRangeStepper()
 
 export function layoutNextLineRange(
   prepared: PreparedLineBreakData,
@@ -1073,7 +986,11 @@ export function layoutNextLineRange(
   if (prepared.simpleLineWalkFastPath) {
     return layoutNextLineRangeSimple(prepared, normalizedStart, maxWidth)
   }
-  return fullLineRangeStepper.run(prepared, normalizedStart, maxWidth)
+  const ep = getEngineProfile()
+  return new FullLineRangeStepper(
+    prepared, maxWidth, maxWidth + ep.lineFitEpsilon,
+    ep.preferPrefixWidthsForBreakableRuns, ep.preferEarlySoftHyphenBreak,
+  ).run(normalizedStart)
 }
 
 class SimpleLineRangeStepper {
@@ -1087,32 +1004,18 @@ class SimpleLineRangeStepper {
   private pendingBreakSegmentIndex = -1
   private pendingBreakPaintWidth = 0
 
-  // Bound once per run
-  private widths!: number[]
-  private kinds!: SegmentBreakKind[]
-  private breakableWidths!: (number[] | null)[]
-  private breakablePrefixWidths!: (number[] | null)[]
-  private maxWidth = 0
-  private lineFitEpsilon = 0
-  private effectiveMaxWidth = 0
-  private preferPrefixWidths = false
+  constructor(
+    private readonly p: PreparedLineBreakData,
+    private readonly maxWidth: number,
+    private readonly effectiveMaxWidth: number,
+    private readonly preferPrefixWidths: boolean,
+  ) {}
 
-  run(
-    prepared: PreparedLineBreakData,
-    normalizedStart: LineBreakCursor,
-    maxWidth: number,
-  ): InternalLayoutLine | null {
-    const { widths, kinds, breakableWidths, breakablePrefixWidths } = prepared
-    const engineProfile = getEngineProfile()
+  run(normalizedStart: LineBreakCursor): InternalLayoutLine | null {
+    const { widths, kinds, breakableWidths } = this.p
+    const maxWidth = this.maxWidth
+    const effectiveMaxWidth = this.effectiveMaxWidth
 
-    this.widths = widths
-    this.kinds = kinds
-    this.breakableWidths = breakableWidths
-    this.breakablePrefixWidths = breakablePrefixWidths
-    this.maxWidth = maxWidth
-    this.lineFitEpsilon = engineProfile.lineFitEpsilon
-    this.effectiveMaxWidth = maxWidth + engineProfile.lineFitEpsilon
-    this.preferPrefixWidths = engineProfile.preferPrefixWidthsForBreakableRuns
     this.lineW = 0
     this.hasContent = false
     this.lineStartSegmentIndex = normalizedStart.segmentIndex
@@ -1121,8 +1024,6 @@ class SimpleLineRangeStepper {
     this.lineEndGraphemeIndex = normalizedStart.graphemeIndex
     this.pendingBreakSegmentIndex = -1
     this.pendingBreakPaintWidth = 0
-
-    const effectiveMaxWidth = this.effectiveMaxWidth
 
     for (let i = normalizedStart.segmentIndex; i < widths.length; i++) {
       const w = widths[i]!
@@ -1211,14 +1112,15 @@ class SimpleLineRangeStepper {
   }
 
   private updatePendingBreak(segmentIndex: number, segmentWidth: number): void {
-    if (!canBreakAfter(this.kinds[segmentIndex]!)) return
+    if (!canBreakAfter(this.p.kinds[segmentIndex]!)) return
     this.pendingBreakSegmentIndex = segmentIndex + 1
     this.pendingBreakPaintWidth = this.lineW - segmentWidth
   }
 
   private appendBreakableSegmentFrom(segmentIndex: number, startGraphemeIdx: number): InternalLayoutLine | null {
-    const gWidths = this.breakableWidths[segmentIndex]!
-    const gPrefixWidths = this.breakablePrefixWidths[segmentIndex] ?? null
+    const { breakableWidths, breakablePrefixWidths } = this.p
+    const gWidths = breakableWidths[segmentIndex]!
+    const gPrefixWidths = breakablePrefixWidths[segmentIndex] ?? null
     const effectiveMaxWidth = this.effectiveMaxWidth
     const preferPrefixWidths = this.preferPrefixWidths
 
@@ -1247,12 +1149,13 @@ class SimpleLineRangeStepper {
   }
 }
 
-const simpleLineRangeStepper = new SimpleLineRangeStepper()
-
 function layoutNextLineRangeSimple(
   prepared: PreparedLineBreakData,
   normalizedStart: LineBreakCursor,
   maxWidth: number,
 ): InternalLayoutLine | null {
-  return simpleLineRangeStepper.run(prepared, normalizedStart, maxWidth)
+  const ep = getEngineProfile()
+  return new SimpleLineRangeStepper(
+    prepared, maxWidth, maxWidth + ep.lineFitEpsilon, ep.preferPrefixWidthsForBreakableRuns,
+  ).run(normalizedStart)
 }

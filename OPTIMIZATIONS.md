@@ -183,3 +183,56 @@ Stream path:
 | Stream-F: 10k | 84,214 | 80,557 | 4% |
 
 **Result: 4–32% faster** across paths. The layout() hot path benefits most (14–32%) because the inline addition was a significant fraction of per-segment work in the minimal `SimpleLineCounter` inner loop. Walk and stream paths see 2–11% gains. All 60 tests pass.
+
+### Stage 1 (Cleanup): Remove singletons, constructor-based init, store prepared ref, drop lineFitEpsilon
+
+**What:** Code cleanup — not a performance optimization. Addresses structural code smells:
+1. **Removed 5 module-scope singleton instances** (`simpleLineCounter`, `simpleLineWalker`, `fullLineWalker`, `fullLineRangeStepper`, `simpleLineRangeStepper`). Each call site now uses `new Class(...).run()`.
+2. **Constructor-based init** replaces the `run()`-preamble field-copying pattern. Parameters that were "bound once per run" (`prepared`, `maxWidth`, `effectiveMaxWidth`, engine profile booleans) are now `readonly` constructor parameters.
+3. **Store `this.p: PreparedLineBreakData` reference** instead of destructuring 5–9 individual array fields onto `this.*`. Methods access `this.p.widths`, etc. Hot inner loops still destructure into locals.
+4. **Removed `lineFitEpsilon` field** from all 5 classes. The one stale direct use (`this.maxWidth + this.lineFitEpsilon` in `FullLineRangeStepper.maybeFinishAtSoftHyphen`) was replaced with `this.effectiveMaxWidth`. The field was otherwise only used to compute `effectiveMaxWidth`, which is now a constructor parameter.
+5. **Removed 5 wrapper functions** whose only purpose was to call the singleton's `.run()` method.
+
+**Property count reduction:**
+- `SimpleLineCounter`: 10 → 7 (3 state + 4 readonly ctor)
+- `SimpleLineWalker`: 18 → 14 (9 state + 5 readonly ctor)
+- `FullLineWalker`: 25 → 18 (12 state + 6 readonly ctor)
+- `FullLineRangeStepper`: 24 → 17 (12 state + 5 readonly ctor)
+- `SimpleLineRangeStepper`: 16 → 12 (8 state + 4 readonly ctor)
+- Total: 93 → 68 fields (−25 fields, −27%)
+
+**Benchmark:** Node v24.13.0, 50 iterations × 1000 calls, 20 warmup batches.
+
+layout() path (uses `SimpleLineCounter`):
+
+| Case | Before (ns) | After (ns) | Change |
+|------|------------|-----------|--------|
+| Latin short (6w) | 34 | 80 | noise-dominated (p5=34) |
+| Latin medium (25w) | 74 | 111 | noise-dominated (p5=51) |
+| Resize sweep (25w) | 56 | 48 | **14% faster** |
+| Corpus 500 segs | 559 | 501 | **10% faster** |
+| Magazine 2k segs | 2,353 | 1,982 | **16% faster** |
+| CJK editorial 5k | 6,620 | 5,331 | **19% faster** |
+| Thai 10k | 14,707 | 12,551 | **15% faster** |
+| Arabic 37k | 52,824 | 47,169 | **11% faster** |
+| Mixed 10k | 14,041 | 12,254 | **13% faster** |
+
+Walk path (uses `SimpleLineWalker` / `FullLineWalker`):
+
+| Case | Before (ns) | After (ns) | Change |
+|------|------------|-----------|--------|
+| Walk: Magazine 2k | 7,031 | 6,418 | **9% faster** |
+| Walk: Arabic 37k | 123,293 | 113,574 | **8% faster** |
+| Full: 2k (SHY+HB) | 9,392 | 8,470 | **10% faster** |
+| Full: 10k (mixed) | 48,956 | 45,514 | **7% faster** |
+
+Stream path (uses `SimpleLineRangeStepper` / `FullLineRangeStepper`):
+
+| Case | Before (ns) | After (ns) | Change |
+|------|------------|-----------|--------|
+| Stream: Magazine 2k | 7,311 | 8,394 | −15% (new per line) |
+| Stream: Mixed 10k | 34,749 | 38,846 | −12% (new per line) |
+| Stream-F: 2k (SHY+HB) | 13,531 | 12,686 | **6% faster** |
+| Stream-F: 10k (mixed) | 81,149 | 77,987 | **4% faster** |
+
+**Result:** Net positive for real-world texts (7–19% faster at editorial scale). Small-text medians are noise-dominated (p5 values match the baseline). Simple streaming path regresses ~12–15% because `new` per line replaces singleton reset — acceptable tradeoff for code cleanliness. Full streaming path improves. All 60 tests pass.
