@@ -949,6 +949,9 @@ class MergeBuilder {
   hasGlue = false
   hasCJK = false
   hasArabicSpace = false
+  // Set when a non-word text segment is pushed that could be an escaped-quote or forward-sticky cluster.
+  // When false, the escaped-quote/forward-sticky/compact post-passes can be skipped entirely.
+  hasNonWordTextSegment = false
 
   reset(carryCJK: boolean): void {
     // Create fresh arrays — previous arrays are owned by the returned MergedSegmentation
@@ -961,6 +964,7 @@ class MergeBuilder {
     this.hasGlue = false
     this.hasCJK = false
     this.hasArabicSpace = false
+    this.hasNonWordTextSegment = false
   }
 
   addPiece(pieceText: string, pieceWordLike: boolean, pieceKind: SegmentBreakKind, pieceStart: number): void {
@@ -1040,6 +1044,12 @@ class MergeBuilder {
       }
     }
 
+    // Track non-word text segments that survive the merge loop —
+    // only these can trigger the escaped-quote/forward-sticky post-passes
+    if (pieceKind === 'text' && !pieceWordLike) {
+      this.hasNonWordTextSegment = true
+    }
+
     // No merge — push new segment
     this.texts[len] = pieceText
     this.isWordLike[len] = pieceWordLike
@@ -1078,53 +1088,58 @@ function buildMergedSegmentation(
   const mergedStarts = builder.starts
   let mergedLen = builder.len
 
-  for (let i = 1; i < mergedLen; i++) {
-    if (
-      mergedKinds[i] === 'text' &&
-      !mergedWordLike[i]! &&
-      isEscapedQuoteClusterSegment(mergedTexts[i]!) &&
-      mergedKinds[i - 1] === 'text'
-    ) {
-      mergedTexts[i - 1] += mergedTexts[i]!
-      mergedWordLike[i - 1] = mergedWordLike[i - 1]! || mergedWordLike[i]!
-      mergedTexts[i] = ''
-    }
-  }
-
-  for (let i = mergedLen - 2; i >= 0; i--) {
-    if (mergedKinds[i] === 'text' && !mergedWordLike[i]! && isForwardStickyClusterSegment(mergedTexts[i]!)) {
-      let j = i + 1
-      while (j < mergedLen && mergedTexts[j] === '') j++
-      if (j < mergedLen && mergedKinds[j] === 'text') {
-        mergedTexts[j] = mergedTexts[i]! + mergedTexts[j]!
-        mergedStarts[j] = mergedStarts[i]!
+  // Escaped-quote backward merge + forward-sticky carry + compact pass:
+  // Only needed when non-word text segments survived the initial merge loop.
+  if (builder.hasNonWordTextSegment) {
+    for (let i = 1; i < mergedLen; i++) {
+      if (
+        mergedKinds[i] === 'text' &&
+        !mergedWordLike[i]! &&
+        isEscapedQuoteClusterSegment(mergedTexts[i]!) &&
+        mergedKinds[i - 1] === 'text'
+      ) {
+        mergedTexts[i - 1] += mergedTexts[i]!
+        mergedWordLike[i - 1] = mergedWordLike[i - 1]! || mergedWordLike[i]!
         mergedTexts[i] = ''
       }
     }
-  }
 
-  let compactLen = 0
-  for (let read = 0; read < mergedLen; read++) {
-    const text = mergedTexts[read]!
-    if (text.length === 0) continue
-    if (compactLen !== read) {
-      mergedTexts[compactLen] = text
-      mergedWordLike[compactLen] = mergedWordLike[read]!
-      mergedKinds[compactLen] = mergedKinds[read]!
-      mergedStarts[compactLen] = mergedStarts[read]!
+    for (let i = mergedLen - 2; i >= 0; i--) {
+      if (mergedKinds[i] === 'text' && !mergedWordLike[i]! && isForwardStickyClusterSegment(mergedTexts[i]!)) {
+        let j = i + 1
+        while (j < mergedLen && mergedTexts[j] === '') j++
+        if (j < mergedLen && mergedKinds[j] === 'text') {
+          mergedTexts[j] = mergedTexts[i]! + mergedTexts[j]!
+          mergedStarts[j] = mergedStarts[i]!
+          mergedTexts[i] = ''
+        }
+      }
     }
-    compactLen++
+
+    let compactLen = 0
+    for (let read = 0; read < mergedLen; read++) {
+      const text = mergedTexts[read]!
+      if (text.length === 0) continue
+      if (compactLen !== read) {
+        mergedTexts[compactLen] = text
+        mergedWordLike[compactLen] = mergedWordLike[read]!
+        mergedKinds[compactLen] = mergedKinds[read]!
+        mergedStarts[compactLen] = mergedStarts[read]!
+      }
+      compactLen++
+    }
+    mergedLen = compactLen
   }
 
-  // Truncate builder arrays to compact length — ownership transfers to the MergedSegmentation.
+  // Truncate builder arrays to final length — ownership transfers to the MergedSegmentation.
   // The next reset() call will create fresh arrays for the builder.
-  mergedTexts.length = compactLen
-  mergedWordLike.length = compactLen
-  mergedKinds.length = compactLen
-  mergedStarts.length = compactLen
+  mergedTexts.length = mergedLen
+  mergedWordLike.length = mergedLen
+  mergedKinds.length = mergedLen
+  mergedStarts.length = mergedLen
 
   const seg: MergedSegmentation = {
-    len: compactLen,
+    len: mergedLen,
     texts: mergedTexts,
     isWordLike: mergedWordLike,
     kinds: mergedKinds,
