@@ -100,3 +100,24 @@ Priority order following the V8 optimization guide:
 | Mixed long (10k segs) | 64,092 | 34,530 | **1.9×** |
 
 **Result: 1.7–19.9× faster** depending on text size. Even larger small-text gains than Round 1 because `walkPreparedLinesSimple` allocated 7 closures per call (vs 1 for the counter). The layout-only path (`layout()` → `countPreparedLinesSimple`) is unaffected — it uses the already-optimized `SimpleLineCounter` from Round 1. All 60 tests pass.
+
+### Round 3: Class-based refactoring of `walkPreparedLines` (full path)
+
+**What:** Converted the full-path `walkPreparedLines` function body (non-simple branch) to a `FullLineWalker` class.
+- 11 closure variables → private fields (same 8 as simple + `pendingBreakFitWidth`, `pendingBreakPaintWidth`, `pendingBreakKind`)
+- 9 nested closures → private methods (`clearPendingBreak`, `emitCurrentLine`, `startLineAtSegment`, `startLineAtGrapheme`, `appendWholeSegment`, `updatePendingBreakForWholeSegment`, `appendBreakableSegmentFrom`, `continueSoftHyphenBreakableSegment`, `emitEmptyChunk`)
+- Additional captured data: `lineEndFitAdvances`, `lineEndPaintAdvances`, `discretionaryHyphenWidth`, `tabStopAdvance`, `preferEarlySoftHyphenBreak`
+- Module-scope singleton instance reused across calls
+
+**Benchmark:** Node v24.13.0, 50 iterations × 1000 calls, 20 warmup batches. This measures `walkPreparedLines()` with `simpleLineWalkFastPath: false` — the path used by texts containing soft hyphens, tabs, and hard breaks.
+
+| Case | Before (ns) | After (ns) | Speedup |
+|------|------------|-----------|---------|
+| Latin 25w (SHY+HB) | 2,349 | 242 | **9.7×** |
+| Latin 100w (SHY+HB) | 3,621 | 896 | **4.0×** |
+| 500 segs (SHY+HB) | 6,115 | 2,283 | **2.7×** |
+| 2k segs (SHY+HB) | 18,247 | 10,250 | **1.8×** |
+| 5k segs (mixed) | 41,627 | 25,971 | **1.6×** |
+| 10k segs (mixed) | 81,627 | 53,349 | **1.5×** |
+
+**Result: 1.5–9.7× faster** depending on text size. Similar pattern to Rounds 1–2: small texts gain more from eliminating per-call closure allocation. This was the most complex refactoring — 9 closures and soft-hyphen continuation logic. All 60 tests pass.

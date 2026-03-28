@@ -116,6 +116,137 @@ function makePrepared(opts: {
   } as unknown as PreparedText
 }
 
+// Build a synthetic PreparedText that exercises the full (non-simple) line-walk path.
+// Includes soft hyphens, hard breaks (multiple chunks), and optional tabs.
+function makePreparedFull(opts: {
+  segmentCount: number
+  avgWordWidth: number
+  spaceWidth: number
+  maxWidth: number
+  softHyphenRate?: number   // fraction of word segments followed by a soft-hyphen segment
+  hardBreakRate?: number    // fraction of spaces replaced by hard breaks (creating chunks)
+  tabRate?: number          // fraction of spaces replaced by tab segments
+  breakableRatio?: number
+  seed?: number
+}): PreparedText {
+  const {
+    segmentCount,
+    avgWordWidth,
+    spaceWidth,
+    softHyphenRate = 0.1,
+    hardBreakRate = 0.05,
+    tabRate = 0,
+    breakableRatio = 0,
+  } = opts
+  resetSeed(opts.seed ?? 42)
+
+  const widths: number[] = []
+  const lineEndFitAdvances: number[] = []
+  const lineEndPaintAdvances: number[] = []
+  const kinds: SegmentBreakKind[] = []
+  const breakableWidths: (number[] | null)[] = []
+  const breakablePrefixWidths: (number[] | null)[] = []
+
+  // Track hard break positions for chunk building
+  const hardBreakPositions: number[] = []
+
+  for (let i = 0; i < segmentCount; i++) {
+    const isSpace = i % 2 === 1
+    if (isSpace) {
+      const r = rand()
+      if (r < hardBreakRate) {
+        // Hard break segment
+        widths.push(0)
+        lineEndFitAdvances.push(0)
+        lineEndPaintAdvances.push(0)
+        kinds.push('hard-break')
+        breakableWidths.push(null)
+        breakablePrefixWidths.push(null)
+        hardBreakPositions.push(i)
+      } else if (r < hardBreakRate + tabRate) {
+        // Tab segment
+        widths.push(spaceWidth * 4) // approximate tab width
+        lineEndFitAdvances.push(0)
+        lineEndPaintAdvances.push(spaceWidth * 4)
+        kinds.push('tab')
+        breakableWidths.push(null)
+        breakablePrefixWidths.push(null)
+      } else if (rand() < softHyphenRate) {
+        // Space followed by soft-hyphen: emit space then soft-hyphen
+        widths.push(spaceWidth)
+        lineEndFitAdvances.push(0)
+        lineEndPaintAdvances.push(0)
+        kinds.push('space')
+        breakableWidths.push(null)
+        breakablePrefixWidths.push(null)
+        // Note: soft hyphen is a zero-width break opportunity
+        // We just use space + mark it as soft-hyphen next time
+      } else {
+        widths.push(spaceWidth)
+        lineEndFitAdvances.push(0)
+        lineEndPaintAdvances.push(0)
+        kinds.push('space')
+        breakableWidths.push(null)
+        breakablePrefixWidths.push(null)
+      }
+    } else {
+      const w = avgWordWidth * (0.6 + rand() * 0.8)
+      widths.push(w)
+      lineEndFitAdvances.push(w)
+      lineEndPaintAdvances.push(w)
+
+      // Occasionally emit a soft-hyphen kind on word segments
+      if (rand() < softHyphenRate) {
+        kinds.push('soft-hyphen')
+      } else {
+        kinds.push('text')
+      }
+
+      if (breakableRatio > 0 && rand() < breakableRatio) {
+        const graphemeCount = Math.max(2, Math.round(w / 8))
+        const gWidths = Array.from({ length: graphemeCount }, () => w / graphemeCount)
+        breakableWidths.push(gWidths)
+        breakablePrefixWidths.push(null)
+      } else {
+        breakableWidths.push(null)
+        breakablePrefixWidths.push(null)
+      }
+    }
+  }
+
+  // Build chunks from hard breaks
+  const chunks: { startSegmentIndex: number; endSegmentIndex: number; consumedEndSegmentIndex: number }[] = []
+  let chunkStart = 0
+  for (const hbPos of hardBreakPositions) {
+    chunks.push({
+      startSegmentIndex: chunkStart,
+      endSegmentIndex: hbPos,
+      consumedEndSegmentIndex: hbPos + 1,
+    })
+    chunkStart = hbPos + 1
+  }
+  // Final chunk
+  chunks.push({
+    startSegmentIndex: chunkStart,
+    endSegmentIndex: widths.length,
+    consumedEndSegmentIndex: widths.length,
+  })
+
+  return {
+    widths,
+    lineEndFitAdvances,
+    lineEndPaintAdvances,
+    kinds,
+    simpleLineWalkFastPath: false,
+    segLevels: null,
+    breakableWidths,
+    breakablePrefixWidths,
+    discretionaryHyphenWidth: 5.5,
+    tabStopAdvance: spaceWidth * 8,
+    chunks,
+  } as unknown as PreparedText
+}
+
 // --- Benchmark harness ---
 
 function median(arr: number[]): number {
@@ -368,3 +499,63 @@ for (const c of walkCases) {
 console.log()
 console.log('JSON summary (walk):')
 console.log(JSON.stringify(walkResults.map(r => ({ label: r.label, medianNs: Math.round(r.medianNs), lineCount: r.lineCount })), null, 2))
+
+// =============================================================================
+// Full-path walkPreparedLines benchmark (non-simple: soft hyphens, chunks, tabs)
+// =============================================================================
+
+console.log()
+console.log()
+console.log('pretext walkPreparedLines() full-path microbenchmark (soft hyphens, chunks)')
+console.log('='.repeat(80))
+console.log(`Node ${process.version} | ${ITERATIONS} iterations × 1000 calls | ${WARMUP} warmup batches`)
+console.log()
+
+const fullCases = [
+  {
+    label: 'Full: Latin 25w (SHY+HB)',
+    prepared: makePreparedFull({ segmentCount: 49, avgWordWidth: 45, spaceWidth: 4.4, maxWidth: 400, softHyphenRate: 0.15, hardBreakRate: 0.08 }),
+    maxWidth: 400,
+  },
+  {
+    label: 'Full: Latin 100w (SHY+HB)',
+    prepared: makePreparedFull({ segmentCount: 199, avgWordWidth: 45, spaceWidth: 4.4, maxWidth: 400, softHyphenRate: 0.15, hardBreakRate: 0.05 }),
+    maxWidth: 400,
+  },
+  {
+    label: 'Full: 500 segs (SHY+HB)',
+    prepared: makePreparedFull({ segmentCount: 500, avgWordWidth: 40, spaceWidth: 4.4, maxWidth: 350, softHyphenRate: 0.1, hardBreakRate: 0.03 }),
+    maxWidth: 350,
+  },
+  {
+    label: 'Full: 2k segs (SHY+HB)',
+    prepared: makePreparedFull({ segmentCount: 2000, avgWordWidth: 42, spaceWidth: 4.4, maxWidth: 350, softHyphenRate: 0.1, hardBreakRate: 0.03 }),
+    maxWidth: 350,
+  },
+  {
+    label: 'Full: 5k segs (mixed)',
+    prepared: makePreparedFull({ segmentCount: 5000, avgWordWidth: 30, spaceWidth: 4, maxWidth: 300, softHyphenRate: 0.08, hardBreakRate: 0.02, breakableRatio: 0.3 }),
+    maxWidth: 300,
+  },
+  {
+    label: 'Full: 10k segs (mixed)',
+    prepared: makePreparedFull({ segmentCount: 10000, avgWordWidth: 30, spaceWidth: 4, maxWidth: 300, softHyphenRate: 0.08, hardBreakRate: 0.02, breakableRatio: 0.3 }),
+    maxWidth: 300,
+  },
+]
+
+const fullResults: { label: string; medianNs: number; lineCount: number }[] = []
+
+for (const c of fullCases) {
+  const r = runWalkBenchmark(c.label, c.prepared, c.maxWidth, ITERATIONS, WARMUP)
+  fullResults.push(r)
+  console.log(
+    `${r.label.padEnd(30)} ${(r.medianNs).toFixed(0).padStart(8)}ns median | ` +
+    `${r.p5Ns.toFixed(0).padStart(7)}ns p5 | ${r.p95Ns.toFixed(0).padStart(7)}ns p95 | ` +
+    `${(r.opsPerSec / 1e6).toFixed(2).padStart(6)}M ops/s | ${r.lineCount} lines`
+  )
+}
+
+console.log()
+console.log('JSON summary (full-path walk):')
+console.log(JSON.stringify(fullResults.map(r => ({ label: r.label, medianNs: Math.round(r.medianNs), lineCount: r.lineCount })), null, 2))
