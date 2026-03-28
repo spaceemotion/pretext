@@ -1073,10 +1073,53 @@ function buildMergedSegmentation(
 
   const segments = wordSegmenter.segment(normalized)
   const iter = segments[Symbol.iterator]()
+
+  // Pre-scan normalized text for content-presence flags.
+  // These are cheap string searches that allow skipping entire post-merge passes.
+  let hasUrlLikeContent = false
+  let hasDigit = false
+  let hasAsciiChainJoiner = false
+  for (let si = 0; si < normalized.length; si++) {
+    const c = normalized.charCodeAt(si)
+    if (!hasDigit && c >= 0x30 && c <= 0x39) hasDigit = true
+    if (!hasAsciiChainJoiner && (c === 0x3B || c === 0x2C) && si > 0) hasAsciiChainJoiner = true // ; or , (not leading)
+    if (!hasUrlLikeContent && c === 0x3A && si + 2 < normalized.length && // ':'
+        normalized.charCodeAt(si + 1) === 0x2F && normalized.charCodeAt(si + 2) === 0x2F) { // '://'
+      hasUrlLikeContent = true
+    }
+    if (hasDigit && hasAsciiChainJoiner && hasUrlLikeContent) break
+  }
+  // Also check for 'www.' prefix which doesn't need '://'
+  if (!hasUrlLikeContent && normalized.length >= 4) {
+    // Check if 'www.' appears at start or after a space
+    if (normalized.charCodeAt(0) === 0x77 && normalized.charCodeAt(1) === 0x77 &&
+        normalized.charCodeAt(2) === 0x77 && normalized.charCodeAt(3) === 0x2E) {
+      hasUrlLikeContent = true
+    } else {
+      for (let si = 1; si < normalized.length - 4; si++) {
+        if (normalized.charCodeAt(si) === 0x20 && // space before 'www.'
+            normalized.charCodeAt(si + 1) === 0x77 && normalized.charCodeAt(si + 2) === 0x77 &&
+            normalized.charCodeAt(si + 3) === 0x77 && normalized.charCodeAt(si + 4) === 0x2E) {
+          hasUrlLikeContent = true
+          break
+        }
+      }
+    }
+  }
+  // Check for non-ASCII digits if no ASCII digit found
+  if (!hasDigit) {
+    for (let si = 0; si < normalized.length; si++) {
+      const c = normalized.charCodeAt(si)
+      if (c >= 0x0660 && c <= 0x0669) { hasDigit = true; break } // Arabic-Indic
+      if (c >= 0x0966 && c <= 0x096F) { hasDigit = true; break } // Devanagari
+      if (c >= 0x09E6 && c <= 0x09EF) { hasDigit = true; break } // Bengali
+    }
+  }
+
   for (let r = iter.next(); !r.done; r = iter.next()) {
     const s = r.value
     const seg = s.segment
-    const wordLike = s.isWordLike ?? false
+    const wordLike = s.isWordLike === true
     // Fast path: if segment has no special chars, emit as single 'text' piece
     if (!segmentNeedsSplitting(seg, whiteSpaceProfile)) {
       builder.addPiece(seg, wordLike, 'text', s.index)
@@ -1151,11 +1194,15 @@ function buildMergedSegmentation(
 
   // Skip post-merge passes that can't fire based on content-presence flags.
   if (builder.hasGlue) mergeGlueConnectedTextRunsInPlace(seg)
-  mergeUrlLikeRunsInPlace(seg)
-  mergeUrlQueryRunsInPlace(seg)
-  mergeNumericRunsInPlace(seg)
-  splitHyphenatedNumericRunsInPlace(seg)
-  mergeAsciiPunctuationChainsInPlace(seg)
+  if (hasUrlLikeContent) {
+    mergeUrlLikeRunsInPlace(seg)
+    mergeUrlQueryRunsInPlace(seg)
+  }
+  if (hasDigit) {
+    mergeNumericRunsInPlace(seg)
+    splitHyphenatedNumericRunsInPlace(seg)
+  }
+  if (hasAsciiChainJoiner) mergeAsciiPunctuationChainsInPlace(seg)
   if (builder.hasCJK) carryTrailingForwardStickyAcrossCJKBoundaryInPlace(seg)
 
   if (builder.hasArabicSpace) {
