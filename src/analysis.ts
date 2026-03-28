@@ -915,6 +915,7 @@ function buildMergedSegmentation(
   whiteSpaceProfile: WhiteSpaceProfile,
 ): MergedSegmentation {
   const wordSegmenter = getSharedWordSegmenter()
+  const carryCJK = profile.carryCJKAfterClosingQuote
   let mergedLen = 0
   const mergedTexts: string[] = []
   const mergedWordLike: boolean[] = []
@@ -923,75 +924,76 @@ function buildMergedSegmentation(
 
   for (const s of wordSegmenter.segment(normalized)) {
     forEachBreakKindPiece(s.segment, s.isWordLike ?? false, s.index, whiteSpaceProfile, (pieceText, pieceWordLike, pieceKind, pieceStart) => {
-      const isText = pieceKind === 'text'
+      // Fast path: try to merge into previous text segment
+      if (pieceKind === 'text' && mergedLen > 0 && mergedKinds[mergedLen - 1] === 'text') {
+        const prevText = mergedTexts[mergedLen - 1]!
 
-      if (
-        profile.carryCJKAfterClosingQuote &&
-        isText &&
-        mergedLen > 0 &&
-        mergedKinds[mergedLen - 1] === 'text' &&
-        isCJK(pieceText) &&
-        isCJK(mergedTexts[mergedLen - 1]!) &&
-        endsWithClosingQuote(mergedTexts[mergedLen - 1]!)
-      ) {
-        mergedTexts[mergedLen - 1] += pieceText
-        mergedWordLike[mergedLen - 1] = mergedWordLike[mergedLen - 1]! || pieceWordLike
-      } else if (
-        isText &&
-        mergedLen > 0 &&
-        mergedKinds[mergedLen - 1] === 'text' &&
-        isCJKLineStartProhibitedSegment(pieceText) &&
-        isCJK(mergedTexts[mergedLen - 1]!)
-      ) {
-        mergedTexts[mergedLen - 1] += pieceText
-        mergedWordLike[mergedLen - 1] = mergedWordLike[mergedLen - 1]! || pieceWordLike
-      } else if (
-        isText &&
-        mergedLen > 0 &&
-        mergedKinds[mergedLen - 1] === 'text' &&
-        endsWithMyanmarMedialGlue(mergedTexts[mergedLen - 1]!)
-      ) {
-        mergedTexts[mergedLen - 1] += pieceText
-        mergedWordLike[mergedLen - 1] = mergedWordLike[mergedLen - 1]! || pieceWordLike
-      } else if (
-        isText &&
-        mergedLen > 0 &&
-        mergedKinds[mergedLen - 1] === 'text' &&
-        pieceWordLike &&
-        containsArabicScript(pieceText) &&
-        endsWithArabicNoSpacePunctuation(mergedTexts[mergedLen - 1]!)
-      ) {
-        mergedTexts[mergedLen - 1] += pieceText
-        mergedWordLike[mergedLen - 1] = true
-      } else if (
-        isText &&
-        !pieceWordLike &&
-        mergedLen > 0 &&
-        mergedKinds[mergedLen - 1] === 'text' &&
-        pieceText.length === 1 &&
-        pieceText !== '-' &&
-        pieceText !== '—' &&
-        isRepeatedSingleCharRun(mergedTexts[mergedLen - 1]!, pieceText)
-      ) {
-        mergedTexts[mergedLen - 1] += pieceText
-      } else if (
-        isText &&
-        !pieceWordLike &&
-        mergedLen > 0 &&
-        mergedKinds[mergedLen - 1] === 'text' &&
-        (
-          isLeftStickyPunctuationSegment(pieceText) ||
-          (pieceText === '-' && mergedWordLike[mergedLen - 1]!)
-        )
-      ) {
-        mergedTexts[mergedLen - 1] += pieceText
-      } else {
-        mergedTexts[mergedLen] = pieceText
-        mergedWordLike[mergedLen] = pieceWordLike
-        mergedKinds[mergedLen] = pieceKind
-        mergedStarts[mergedLen] = pieceStart
-        mergedLen++
+        if (pieceWordLike) {
+          // Word-like text piece — check Arabic no-space punctuation merge
+          if (
+            containsArabicScript(pieceText) &&
+            endsWithArabicNoSpacePunctuation(prevText)
+          ) {
+            mergedTexts[mergedLen - 1] += pieceText
+            mergedWordLike[mergedLen - 1] = true
+            return
+          }
+        } else {
+          // Non-word-like text piece — check left-sticky punctuation, repeated chars
+          if (
+            isLeftStickyPunctuationSegment(pieceText) ||
+            (pieceText === '-' && mergedWordLike[mergedLen - 1]!)
+          ) {
+            mergedTexts[mergedLen - 1] += pieceText
+            return
+          }
+          if (
+            pieceText.length === 1 &&
+            pieceText !== '-' &&
+            pieceText !== '\u2014' &&
+            isRepeatedSingleCharRun(prevText, pieceText)
+          ) {
+            mergedTexts[mergedLen - 1] += pieceText
+            return
+          }
+        }
+
+        // CJK kinsoku: line-start prohibited merge
+        if (
+          isCJKLineStartProhibitedSegment(pieceText) &&
+          isCJK(prevText)
+        ) {
+          mergedTexts[mergedLen - 1] += pieceText
+          mergedWordLike[mergedLen - 1] = mergedWordLike[mergedLen - 1]! || pieceWordLike
+          return
+        }
+
+        // CJK after closing quote (Chromium profile only)
+        if (
+          carryCJK &&
+          isCJK(pieceText) &&
+          isCJK(prevText) &&
+          endsWithClosingQuote(prevText)
+        ) {
+          mergedTexts[mergedLen - 1] += pieceText
+          mergedWordLike[mergedLen - 1] = mergedWordLike[mergedLen - 1]! || pieceWordLike
+          return
+        }
+
+        // Myanmar medial glue
+        if (endsWithMyanmarMedialGlue(prevText)) {
+          mergedTexts[mergedLen - 1] += pieceText
+          mergedWordLike[mergedLen - 1] = mergedWordLike[mergedLen - 1]! || pieceWordLike
+          return
+        }
       }
+
+      // No merge — push new segment
+      mergedTexts[mergedLen] = pieceText
+      mergedWordLike[mergedLen] = pieceWordLike
+      mergedKinds[mergedLen] = pieceKind
+      mergedStarts[mergedLen] = pieceStart
+      mergedLen++
     })
   }
 
