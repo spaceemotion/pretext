@@ -103,24 +103,36 @@ function containsArabicScript(text: string): boolean {
 }
 
 export function isCJK(s: string): boolean {
-  for (const ch of s) {
-    const c = ch.codePointAt(0)!
+  const len = s.length
+  for (let i = 0; i < len; i++) {
+    const c = s.charCodeAt(i)
+    // BMP CJK ranges (most common)
     if ((c >= 0x4E00 && c <= 0x9FFF) ||
         (c >= 0x3400 && c <= 0x4DBF) ||
-        (c >= 0x20000 && c <= 0x2A6DF) ||
-        (c >= 0x2A700 && c <= 0x2B73F) ||
-        (c >= 0x2B740 && c <= 0x2B81F) ||
-        (c >= 0x2B820 && c <= 0x2CEAF) ||
-        (c >= 0x2CEB0 && c <= 0x2EBEF) ||
-        (c >= 0x30000 && c <= 0x3134F) ||
-        (c >= 0xF900 && c <= 0xFAFF) ||
-        (c >= 0x2F800 && c <= 0x2FA1F) ||
         (c >= 0x3000 && c <= 0x303F) ||
         (c >= 0x3040 && c <= 0x309F) ||
         (c >= 0x30A0 && c <= 0x30FF) ||
         (c >= 0xAC00 && c <= 0xD7AF) ||
-        (c >= 0xFF00 && c <= 0xFFEF)) {
+        (c >= 0xFF00 && c <= 0xFFEF) ||
+        (c >= 0xF900 && c <= 0xFAFF)) {
       return true
+    }
+    // Surrogate pair → decode astral code point
+    if (c >= 0xD800 && c <= 0xDBFF && i + 1 < len) {
+      const lo = s.charCodeAt(i + 1)
+      if (lo >= 0xDC00 && lo <= 0xDFFF) {
+        const cp = ((c - 0xD800) << 10) + (lo - 0xDC00) + 0x10000
+        if ((cp >= 0x20000 && cp <= 0x2A6DF) ||
+            (cp >= 0x2A700 && cp <= 0x2B73F) ||
+            (cp >= 0x2B740 && cp <= 0x2B81F) ||
+            (cp >= 0x2B820 && cp <= 0x2CEAF) ||
+            (cp >= 0x2CEB0 && cp <= 0x2EBEF) ||
+            (cp >= 0x30000 && cp <= 0x3134F) ||
+            (cp >= 0x2F800 && cp <= 0x2FA1F)) {
+          return true
+        }
+        i++ // skip low surrogate
+      }
     }
   }
   return false
@@ -219,7 +231,8 @@ const closingQuoteChars = new Set([
 function isLeftStickyPunctuationSegment(segment: string): boolean {
   if (isEscapedQuoteClusterSegment(segment)) return true
   let sawPunctuation = false
-  for (const ch of segment) {
+  for (let i = 0; i < segment.length; i++) {
+    const ch = segment[i]!
     if (leftStickyPunctuation.has(ch)) {
       sawPunctuation = true
       continue
@@ -231,7 +244,8 @@ function isLeftStickyPunctuationSegment(segment: string): boolean {
 }
 
 function isCJKLineStartProhibitedSegment(segment: string): boolean {
-  for (const ch of segment) {
+  for (let i = 0; i < segment.length; i++) {
+    const ch = segment[i]!
     if (!kinsokuStart.has(ch) && !leftStickyPunctuation.has(ch)) return false
   }
   return segment.length > 0
@@ -239,7 +253,8 @@ function isCJKLineStartProhibitedSegment(segment: string): boolean {
 
 function isForwardStickyClusterSegment(segment: string): boolean {
   if (isEscapedQuoteClusterSegment(segment)) return true
-  for (const ch of segment) {
+  for (let i = 0; i < segment.length; i++) {
+    const ch = segment[i]!
     if (!kinsokuEnd.has(ch) && !forwardStickyGlue.has(ch) && !combiningMarkRe.test(ch)) return false
   }
   return segment.length > 0
@@ -247,7 +262,8 @@ function isForwardStickyClusterSegment(segment: string): boolean {
 
 function isEscapedQuoteClusterSegment(segment: string): boolean {
   let sawQuote = false
-  for (const ch of segment) {
+  for (let i = 0; i < segment.length; i++) {
+    const ch = segment[i]!
     if (ch === '\\' || combiningMarkRe.test(ch)) continue
     if (kinsokuEnd.has(ch) || leftStickyPunctuation.has(ch) || forwardStickyGlue.has(ch)) {
       sawQuote = true
@@ -284,8 +300,8 @@ function splitTrailingForwardStickyCluster(text: string): { head: string, tail: 
 
 function isRepeatedSingleCharRun(segment: string, ch: string): boolean {
   if (segment.length === 0) return false
-  for (const part of segment) {
-    if (part !== ch) return false
+  for (let i = 0; i < segment.length; i++) {
+    if (segment[i] !== ch) return false
   }
   return true
 }
@@ -318,18 +334,21 @@ export function endsWithClosingQuote(text: string): boolean {
   return false
 }
 
-function classifySegmentBreakChar(ch: string, whiteSpaceProfile: WhiteSpaceProfile): SegmentBreakKind {
-  if (whiteSpaceProfile.preserveOrdinarySpaces || whiteSpaceProfile.preserveHardBreaks) {
-    if (ch === ' ') return 'preserved-space'
-    if (ch === '\t') return 'tab'
-    if (whiteSpaceProfile.preserveHardBreaks && ch === '\n') return 'hard-break'
+function classifySegmentBreakCharCode(code: number, whiteSpaceProfile: WhiteSpaceProfile): SegmentBreakKind {
+  if (code === 0x20) { // space
+    return whiteSpaceProfile.preserveOrdinarySpaces ? 'preserved-space' : 'space'
   }
-  if (ch === ' ') return 'space'
-  if (ch === '\u00A0' || ch === '\u202F' || ch === '\u2060' || ch === '\uFEFF') {
+  if (code === 0x09) { // tab
+    return whiteSpaceProfile.preserveOrdinarySpaces ? 'tab' : 'text'
+  }
+  if (code === 0x0A) { // newline
+    return whiteSpaceProfile.preserveHardBreaks ? 'hard-break' : 'text'
+  }
+  if (code === 0x00A0 || code === 0x202F || code === 0x2060 || code === 0xFEFF) {
     return 'glue'
   }
-  if (ch === '\u200B') return 'zero-width-break'
-  if (ch === '\u00AD') return 'soft-hyphen'
+  if (code === 0x200B) return 'zero-width-break'
+  if (code === 0x00AD) return 'soft-hyphen'
   return 'text'
 }
 
@@ -341,24 +360,34 @@ function splitSegmentByBreakKind(
 ): SegmentationPiece[] {
   const pieces: SegmentationPiece[] = []
   let currentKind: SegmentBreakKind | null = null
-  let currentText = ''
+  let runStart = 0
   let currentStart = start
   let currentWordLike = false
-  let offset = 0
+  const len = segment.length
 
-  for (const ch of segment) {
-    const kind = classifySegmentBreakChar(ch, whiteSpaceProfile)
+  for (let i = 0; i < len; i++) {
+    let code = segment.charCodeAt(i)
+    let charLen = 1
+    // Handle surrogate pairs — astral chars are always 'text'
+    if (code >= 0xD800 && code <= 0xDBFF && i + 1 < len) {
+      const lo = segment.charCodeAt(i + 1)
+      if (lo >= 0xDC00 && lo <= 0xDFFF) {
+        code = 0x10000 // sentinel: any astral char → 'text'
+        charLen = 2
+      }
+    }
+
+    const kind = classifySegmentBreakCharCode(code, whiteSpaceProfile)
     const wordLike = kind === 'text' && isWordLike
 
     if (currentKind !== null && kind === currentKind && wordLike === currentWordLike) {
-      currentText += ch
-      offset += ch.length
+      i += charLen - 1 // skip low surrogate if pair
       continue
     }
 
     if (currentKind !== null) {
       pieces.push({
-        text: currentText,
+        text: segment.slice(runStart, i),
         isWordLike: currentWordLike,
         kind: currentKind,
         start: currentStart,
@@ -366,15 +395,15 @@ function splitSegmentByBreakKind(
     }
 
     currentKind = kind
-    currentText = ch
-    currentStart = start + offset
+    runStart = i
+    currentStart = start + i
     currentWordLike = wordLike
-    offset += ch.length
+    i += charLen - 1 // skip low surrogate if pair
   }
 
   if (currentKind !== null) {
     pieces.push({
-      text: currentText,
+      text: segment.slice(runStart),
       isWordLike: currentWordLike,
       kind: currentKind,
       start: currentStart,
@@ -517,16 +546,28 @@ const asciiPunctuationChainSegmentRe = /^[A-Za-z0-9_]+[,:;]*$/
 const asciiPunctuationChainTrailingJoinersRe = /[,:;]+$/
 
 function segmentContainsDecimalDigit(text: string): boolean {
-  for (const ch of text) {
-    if (decimalDigitRe.test(ch)) return true
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i)
+    // ASCII digits 0-9
+    if (c >= 0x30 && c <= 0x39) return true
+    // Common non-ASCII decimal digit ranges (Arabic-Indic, Devanagari, etc.)
+    if (c >= 0x0660 && decimalDigitRe.test(text[i]!)) return true
   }
   return false
 }
 
 function isNumericRunSegment(text: string): boolean {
   if (text.length === 0) return false
-  for (const ch of text) {
-    if (decimalDigitRe.test(ch) || numericJoinerChars.has(ch)) continue
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i)
+    // ASCII digits
+    if (c >= 0x30 && c <= 0x39) continue
+    // Numeric joiner chars by charCode
+    if (c === 0x3A || c === 0x2D || c === 0x2F || c === 0xD7 || // : - / ×
+        c === 0x2C || c === 0x2E || c === 0x2B || // , . +
+        c === 0x2013 || c === 0x2014) continue // en-dash, em-dash
+    // Non-ASCII decimal digits
+    if (c >= 0x0660 && decimalDigitRe.test(text[i]!)) continue
     return false
   }
   return true
