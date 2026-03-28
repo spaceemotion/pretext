@@ -139,58 +139,68 @@ export function countPreparedLines(prepared: PreparedLineBreakData, maxWidth: nu
 
 function countPreparedLinesSimple(prepared: PreparedLineBreakData, maxWidth: number): number {
   const { widths, kinds, breakableWidths, breakablePrefixWidths } = prepared
-  if (widths.length === 0) return 0
+  const len = widths.length
+  if (len === 0) return 0
 
   const engineProfile = getEngineProfile()
-  const lineFitEpsilon = engineProfile.lineFitEpsilon
+  const maxWidthPlusEps = maxWidth + engineProfile.lineFitEpsilon
+  const preferPrefixWidths = engineProfile.preferPrefixWidthsForBreakableRuns
 
   let lineCount = 0
   let lineW = 0
   let hasContent = false
 
-  function placeOnFreshLine(segmentIndex: number): void {
-    const w = widths[segmentIndex]!
-    if (w > maxWidth && breakableWidths[segmentIndex] !== null) {
-      const gWidths = breakableWidths[segmentIndex]!
-      const gPrefixWidths = breakablePrefixWidths[segmentIndex] ?? null
-      lineW = 0
-      for (let g = 0; g < gWidths.length; g++) {
-        const gw = getBreakableAdvance(
-          gWidths,
-          gPrefixWidths,
-          g,
-          engineProfile.preferPrefixWidthsForBreakableRuns,
-        )
-        if (lineW > 0 && lineW + gw > maxWidth + lineFitEpsilon) {
-          lineCount++
-          lineW = gw
-        } else {
-          if (lineW === 0) lineCount++
-          lineW += gw
-        }
-      }
-    } else {
-      lineW = w
-      lineCount++
-    }
-    hasContent = true
-  }
-
-  for (let i = 0; i < widths.length; i++) {
+  for (let i = 0; i < len; i++) {
     const w = widths[i]!
-    const kind = kinds[i]!
 
     if (!hasContent) {
-      placeOnFreshLine(i)
+      // --- inlined placeOnFreshLine ---
+      if (w > maxWidth && breakableWidths[i] !== null) {
+        const gWidths = breakableWidths[i]!
+        const gPrefixWidths = breakablePrefixWidths[i] ?? null
+        lineW = 0
+        for (let g = 0; g < gWidths.length; g++) {
+          const gw = getBreakableAdvance(gWidths, gPrefixWidths, g, preferPrefixWidths)
+          if (lineW > 0 && lineW + gw > maxWidthPlusEps) {
+            lineCount++
+            lineW = gw
+          } else {
+            if (lineW === 0) lineCount++
+            lineW += gw
+          }
+        }
+      } else {
+        lineW = w
+        lineCount++
+      }
+      hasContent = true
       continue
     }
 
     const newW = lineW + w
-    if (newW > maxWidth + lineFitEpsilon) {
-      if (isSimpleCollapsibleSpace(kind)) continue
-      lineW = 0
-      hasContent = false
-      placeOnFreshLine(i)
+    if (newW > maxWidthPlusEps) {
+      if (kinds[i] === 'space') continue
+      // --- inlined placeOnFreshLine after reset ---
+      if (w > maxWidth && breakableWidths[i] !== null) {
+        const gWidths = breakableWidths[i]!
+        const gPrefixWidths = breakablePrefixWidths[i] ?? null
+        lineW = 0
+        for (let g = 0; g < gWidths.length; g++) {
+          const gw = getBreakableAdvance(gWidths, gPrefixWidths, g, preferPrefixWidths)
+          if (lineW > 0 && lineW + gw > maxWidthPlusEps) {
+            lineCount++
+            lineW = gw
+          } else {
+            if (lineW === 0) lineCount++
+            lineW += gw
+          }
+        }
+        hasContent = true
+      } else {
+        lineW = w
+        lineCount++
+        hasContent = true
+      }
       continue
     }
 
