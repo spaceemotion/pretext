@@ -230,7 +230,7 @@ function countPreparedLinesSimple(prepared: PreparedLineBreakData, maxWidth: num
   ).run()
 }
 
-class SimpleLineWalker {
+class SimpleLineEngine {
   // Per-run state
   private lineCount = 0
   private lineW = 0
@@ -241,6 +241,9 @@ class SimpleLineWalker {
   private lineEndGraphemeIndex = 0
   private pendingBreakSegmentIndex = -1
   private pendingBreakPaintWidth = 0
+  // Step mode: first completed line captured here
+  private stepping = false
+  private result: InternalLayoutLine | null = null
 
   constructor(
     private readonly p: PreparedLineBreakData,
@@ -250,7 +253,7 @@ class SimpleLineWalker {
     private readonly onLine: ((line: InternalLayoutLine) => void) | undefined,
   ) {}
 
-  run(): number {
+  walkAll(): number {
     const { widths, kinds, breakableWidths } = this.p
     if (widths.length === 0) return 0
 
@@ -307,6 +310,64 @@ class SimpleLineWalker {
     return this.lineCount
   }
 
+  stepOne(normalizedStart: LineBreakCursor): InternalLayoutLine | null {
+    const { widths, kinds, breakableWidths } = this.p
+    const maxWidth = this.maxWidth
+    const effectiveMaxWidth = this.effectiveMaxWidth
+
+    this.stepping = true
+    this.lineStartSegmentIndex = normalizedStart.segmentIndex
+    this.lineStartGraphemeIndex = normalizedStart.graphemeIndex
+    this.lineEndSegmentIndex = normalizedStart.segmentIndex
+    this.lineEndGraphemeIndex = normalizedStart.graphemeIndex
+
+    for (let i = normalizedStart.segmentIndex; i < widths.length; i++) {
+      const w = widths[i]!
+      const kind = kinds[i]!
+      const startGraphemeIndex = i === normalizedStart.segmentIndex ? normalizedStart.graphemeIndex : 0
+
+      if (!this.hasContent) {
+        if (startGraphemeIndex > 0) {
+          this.appendBreakableSegmentFrom(i, startGraphemeIndex)
+          if (this.result !== null) return this.result
+        } else if (w > maxWidth && breakableWidths[i] !== null) {
+          this.appendBreakableSegmentFrom(i, 0)
+          if (this.result !== null) return this.result
+        } else {
+          this.startLineAtSegment(i, w)
+        }
+        this.updatePendingBreak(i, w)
+        continue
+      }
+
+      const newW = this.lineW + w
+      if (newW > effectiveMaxWidth) {
+        if (canBreakAfter(kind)) {
+          this.appendWholeSegment(i, w)
+          return this.finishLine(i + 1, 0, this.lineW - w)
+        }
+
+        if (this.pendingBreakSegmentIndex >= 0) {
+          return this.finishLine(this.pendingBreakSegmentIndex, 0, this.pendingBreakPaintWidth)
+        }
+
+        if (w > maxWidth && breakableWidths[i] !== null) {
+          const currentLine = this.finishLine()
+          if (currentLine !== null) return currentLine
+          this.appendBreakableSegmentFrom(i, 0)
+          if (this.result !== null) return this.result
+        }
+
+        return this.finishLine()
+      }
+
+      this.appendWholeSegment(i, w)
+      this.updatePendingBreak(i, w)
+    }
+
+    return this.finishLine()
+  }
+
   private emitCurrentLine(
     endSegmentIndex = this.lineEndSegmentIndex,
     endGraphemeIndex = this.lineEndGraphemeIndex,
@@ -324,6 +385,21 @@ class SimpleLineWalker {
     this.hasContent = false
     this.pendingBreakSegmentIndex = -1
     this.pendingBreakPaintWidth = 0
+  }
+
+  private finishLine(
+    endSegmentIndex = this.lineEndSegmentIndex,
+    endGraphemeIndex = this.lineEndGraphemeIndex,
+    width = this.lineW,
+  ): InternalLayoutLine | null {
+    if (!this.hasContent) return null
+    return {
+      startSegmentIndex: this.lineStartSegmentIndex,
+      startGraphemeIndex: this.lineStartGraphemeIndex,
+      endSegmentIndex,
+      endGraphemeIndex,
+      width,
+    }
   }
 
   private startLineAtSegment(segmentIndex: number, width: number): void {
@@ -376,8 +452,15 @@ class SimpleLineWalker {
       }
 
       if (this.lineW + gw > effectiveMaxWidth) {
-        this.emitCurrentLine()
-        this.startLineAtGrapheme(segmentIndex, g, gw)
+        if (!this.stepping) {
+          // Walk mode: emit and continue
+          this.emitCurrentLine()
+          this.startLineAtGrapheme(segmentIndex, g, gw)
+        } else {
+          // Step mode: capture result and bail
+          this.result = this.finishLine()
+          return
+        }
       } else {
         this.lineW += gw
         this.lineEndSegmentIndex = segmentIndex
@@ -398,9 +481,9 @@ function walkPreparedLinesSimple(
   onLine?: (line: InternalLayoutLine) => void,
 ): number {
   const ep = getEngineProfile()
-  return new SimpleLineWalker(
+  return new SimpleLineEngine(
     prepared, maxWidth, maxWidth + ep.lineFitEpsilon, ep.preferPrefixWidthsForBreakableRuns, onLine,
-  ).run()
+  ).walkAll()
 }
 
 class FullLineWalker {
@@ -993,169 +1076,13 @@ export function layoutNextLineRange(
   ).run(normalizedStart)
 }
 
-class SimpleLineRangeStepper {
-  // Per-run state
-  private lineW = 0
-  private hasContent = false
-  private lineStartSegmentIndex = 0
-  private lineStartGraphemeIndex = 0
-  private lineEndSegmentIndex = 0
-  private lineEndGraphemeIndex = 0
-  private pendingBreakSegmentIndex = -1
-  private pendingBreakPaintWidth = 0
-
-  constructor(
-    private readonly p: PreparedLineBreakData,
-    private readonly maxWidth: number,
-    private readonly effectiveMaxWidth: number,
-    private readonly preferPrefixWidths: boolean,
-  ) {}
-
-  run(normalizedStart: LineBreakCursor): InternalLayoutLine | null {
-    const { widths, kinds, breakableWidths } = this.p
-    const maxWidth = this.maxWidth
-    const effectiveMaxWidth = this.effectiveMaxWidth
-
-    this.lineW = 0
-    this.hasContent = false
-    this.lineStartSegmentIndex = normalizedStart.segmentIndex
-    this.lineStartGraphemeIndex = normalizedStart.graphemeIndex
-    this.lineEndSegmentIndex = normalizedStart.segmentIndex
-    this.lineEndGraphemeIndex = normalizedStart.graphemeIndex
-    this.pendingBreakSegmentIndex = -1
-    this.pendingBreakPaintWidth = 0
-
-    for (let i = normalizedStart.segmentIndex; i < widths.length; i++) {
-      const w = widths[i]!
-      const kind = kinds[i]!
-      const startGraphemeIndex = i === normalizedStart.segmentIndex ? normalizedStart.graphemeIndex : 0
-
-      if (!this.hasContent) {
-        if (startGraphemeIndex > 0) {
-          const line = this.appendBreakableSegmentFrom(i, startGraphemeIndex)
-          if (line !== null) return line
-        } else if (w > maxWidth && breakableWidths[i] !== null) {
-          const line = this.appendBreakableSegmentFrom(i, 0)
-          if (line !== null) return line
-        } else {
-          this.startLineAtSegment(i, w)
-        }
-        this.updatePendingBreak(i, w)
-        continue
-      }
-
-      const newW = this.lineW + w
-      if (newW > effectiveMaxWidth) {
-        if (canBreakAfter(kind)) {
-          this.appendWholeSegment(i, w)
-          return this.finishLine(i + 1, 0, this.lineW - w)
-        }
-
-        if (this.pendingBreakSegmentIndex >= 0) {
-          return this.finishLine(this.pendingBreakSegmentIndex, 0, this.pendingBreakPaintWidth)
-        }
-
-        if (w > maxWidth && breakableWidths[i] !== null) {
-          const currentLine = this.finishLine()
-          if (currentLine !== null) return currentLine
-          const line = this.appendBreakableSegmentFrom(i, 0)
-          if (line !== null) return line
-        }
-
-        return this.finishLine()
-      }
-
-      this.appendWholeSegment(i, w)
-      this.updatePendingBreak(i, w)
-    }
-
-    return this.finishLine()
-  }
-
-  private finishLine(
-    endSegmentIndex = this.lineEndSegmentIndex,
-    endGraphemeIndex = this.lineEndGraphemeIndex,
-    width = this.lineW,
-  ): InternalLayoutLine | null {
-    if (!this.hasContent) return null
-    return {
-      startSegmentIndex: this.lineStartSegmentIndex,
-      startGraphemeIndex: this.lineStartGraphemeIndex,
-      endSegmentIndex,
-      endGraphemeIndex,
-      width,
-    }
-  }
-
-  private startLineAtSegment(segmentIndex: number, width: number): void {
-    this.hasContent = true
-    this.lineEndSegmentIndex = segmentIndex + 1
-    this.lineEndGraphemeIndex = 0
-    this.lineW = width
-  }
-
-  private startLineAtGrapheme(segmentIndex: number, graphemeIndex: number, width: number): void {
-    this.hasContent = true
-    this.lineEndSegmentIndex = segmentIndex
-    this.lineEndGraphemeIndex = graphemeIndex + 1
-    this.lineW = width
-  }
-
-  private appendWholeSegment(segmentIndex: number, width: number): void {
-    if (!this.hasContent) {
-      this.startLineAtSegment(segmentIndex, width)
-      return
-    }
-    this.lineW += width
-    this.lineEndSegmentIndex = segmentIndex + 1
-    this.lineEndGraphemeIndex = 0
-  }
-
-  private updatePendingBreak(segmentIndex: number, segmentWidth: number): void {
-    if (!canBreakAfter(this.p.kinds[segmentIndex]!)) return
-    this.pendingBreakSegmentIndex = segmentIndex + 1
-    this.pendingBreakPaintWidth = this.lineW - segmentWidth
-  }
-
-  private appendBreakableSegmentFrom(segmentIndex: number, startGraphemeIdx: number): InternalLayoutLine | null {
-    const { breakableWidths, breakablePrefixWidths } = this.p
-    const gWidths = breakableWidths[segmentIndex]!
-    const gPrefixWidths = breakablePrefixWidths[segmentIndex] ?? null
-    const effectiveMaxWidth = this.effectiveMaxWidth
-    const preferPrefixWidths = this.preferPrefixWidths
-
-    for (let g = startGraphemeIdx; g < gWidths.length; g++) {
-      const gw = getBreakableAdvance(gWidths, gPrefixWidths, g, preferPrefixWidths)
-
-      if (!this.hasContent) {
-        this.startLineAtGrapheme(segmentIndex, g, gw)
-        continue
-      }
-
-      if (this.lineW + gw > effectiveMaxWidth) {
-        return this.finishLine()
-      }
-
-      this.lineW += gw
-      this.lineEndSegmentIndex = segmentIndex
-      this.lineEndGraphemeIndex = g + 1
-    }
-
-    if (this.hasContent && this.lineEndSegmentIndex === segmentIndex && this.lineEndGraphemeIndex === gWidths.length) {
-      this.lineEndSegmentIndex = segmentIndex + 1
-      this.lineEndGraphemeIndex = 0
-    }
-    return null
-  }
-}
-
 function layoutNextLineRangeSimple(
   prepared: PreparedLineBreakData,
   normalizedStart: LineBreakCursor,
   maxWidth: number,
 ): InternalLayoutLine | null {
   const ep = getEngineProfile()
-  return new SimpleLineRangeStepper(
-    prepared, maxWidth, maxWidth + ep.lineFitEpsilon, ep.preferPrefixWidthsForBreakableRuns,
-  ).run(normalizedStart)
+  return new SimpleLineEngine(
+    prepared, maxWidth, maxWidth + ep.lineFitEpsilon, ep.preferPrefixWidthsForBreakableRuns, undefined,
+  ).stepOne(normalizedStart)
 }

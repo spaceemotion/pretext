@@ -236,3 +236,60 @@ Stream path (uses `SimpleLineRangeStepper` / `FullLineRangeStepper`):
 | Stream-F: 10k (mixed) | 81,149 | 77,987 | **4% faster** |
 
 **Result:** Net positive for real-world texts (7–19% faster at editorial scale). Small-text medians are noise-dominated (p5 values match the baseline). Simple streaming path regresses ~12–15% because `new` per line replaces singleton reset — acceptable tradeoff for code cleanliness. Full streaming path improves. All 60 tests pass.
+
+### Stage 2 (Cleanup): Merge `SimpleLineWalker` + `SimpleLineRangeStepper` → `SimpleLineEngine`
+
+**What:** Structural merge — two classes that walked the same simple segment model (one batch, one streaming) become a single `SimpleLineEngine` with two entry points:
+- `walkAll()` — iterates all segments, emits lines via `onLine` callback, returns count
+- `stepOne(cursor)` — iterates from cursor, returns first completed `InternalLayoutLine | null`
+
+A `stepping` boolean flag distinguishes the two modes inside the shared `appendBreakableSegmentFrom` helper. This is needed because `walkAll()` can be called without an `onLine` callback (from `countPreparedLines`), so `this.onLine !== undefined` cannot distinguish the modes.
+
+**Class/field reduction:**
+- 5 classes → 4 classes (−1)
+- `SimpleLineWalker` (14 fields) + `SimpleLineRangeStepper` (12 fields) = 26 fields across 2 classes
+- `SimpleLineEngine` = 16 fields (11 state + 5 readonly ctor)
+- Total: 68 → 58 fields (−10, −15%)
+
+**Benchmark:** Node v24.13.0, 50 iterations × 1000 calls, 20 warmup batches.
+
+layout() path (uses `SimpleLineCounter`, unchanged):
+
+| Case | Before (ns) | After (ns) | Change |
+|------|------------|-----------|--------|
+| Resize sweep (25w) | 48 | 49 | neutral |
+| Corpus 500 segs | 501 | 521 | neutral |
+| Magazine 2k segs | 1,982 | 2,087 | neutral |
+| CJK editorial 5k | 5,331 | 5,921 | −11% (noise range) |
+| Thai 10k | 12,551 | 12,930 | neutral |
+| Arabic 37k | 47,169 | 48,030 | neutral |
+| Mixed 10k | 12,254 | 12,470 | neutral |
+
+Walk path (now uses `SimpleLineEngine.walkAll()`):
+
+| Case | Before (ns) | After (ns) | Change |
+|------|------------|-----------|--------|
+| Walk: Latin long 100w | 550 | 559 | neutral |
+| Walk: Magazine 2k | 6,418 | 6,321 | neutral |
+| Walk: Thai 10k | 32,499 | 32,297 | neutral |
+| Walk: Arabic 37k | 113,574 | 114,054 | neutral |
+| Walk: Mixed 10k | 31,506 | 31,496 | neutral |
+
+Stream path (now uses `SimpleLineEngine.stepOne()`):
+
+| Case | Before (ns) | After (ns) | Change |
+|------|------------|-----------|--------|
+| Stream: Latin long 100w | 761 | 755 | neutral |
+| Stream: Magazine 2k | 8,394 | 8,526 | neutral |
+| Stream: Mixed 10k | 38,846 | 40,819 | −5% (noise range) |
+
+Full-path walk and stream (uses `FullLineWalker` / `FullLineRangeStepper`, unchanged):
+
+| Case | Before (ns) | After (ns) | Change |
+|------|------------|-----------|--------|
+| Full: 2k (SHY+HB) | 8,470 | 8,746 | neutral |
+| Full: 10k (mixed) | 45,514 | 44,984 | neutral |
+| Stream-F: 2k (SHY+HB) | 12,686 | 13,563 | −7% (noise range) |
+| Stream-F: 10k (mixed) | 77,987 | 80,807 | neutral |
+
+**Result:** Performance-neutral across all paths, as expected for a pure structural merge. No significant regressions. Class count reduced from 5 to 4, field count reduced from 68 to 58. All 60 tests pass.
