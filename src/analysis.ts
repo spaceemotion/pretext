@@ -289,15 +289,26 @@ function isCJKLineStartProhibitedSegment(segment: string): boolean {
 }
 
 function isForwardStickyClusterSegment(segment: string): boolean {
+  if (segment.length === 0) return false
+  // Fast path: single-char segments
+  if (segment.length === 1) {
+    return kinsokuEnd.has(segment) || forwardStickyGlue.has(segment)
+  }
   if (isEscapedQuoteClusterSegment(segment)) return true
   for (let i = 0; i < segment.length; i++) {
     const ch = segment[i]!
     if (!kinsokuEnd.has(ch) && !forwardStickyGlue.has(ch) && !isCombiningMark(ch)) return false
   }
-  return segment.length > 0
+  return true
 }
 
 function isEscapedQuoteClusterSegment(segment: string): boolean {
+  if (segment.length === 0) return false
+  // Quick reject: first char must be \ or a quote/bracket character
+  const first = segment[0]!
+  if (first !== '\\' && !kinsokuEnd.has(first) && !leftStickyPunctuation.has(first) && !forwardStickyGlue.has(first)) {
+    return false
+  }
   let sawQuote = false
   for (let i = 0; i < segment.length; i++) {
     const ch = segment[i]!
@@ -352,8 +363,10 @@ function isRepeatedSingleCharRun(segment: string, ch: string): boolean {
 }
 
 function endsWithArabicNoSpacePunctuation(segment: string): boolean {
-  if (!containsArabicScript(segment) || segment.length === 0) return false
-  return arabicNoSpaceTrailingPunctuation.has(segment[segment.length - 1]!)
+  if (segment.length === 0) return false
+  // Check cheap trailing-char condition first, before the full Arabic scan
+  if (!arabicNoSpaceTrailingPunctuation.has(segment[segment.length - 1]!)) return false
+  return containsArabicScript(segment)
 }
 
 
@@ -933,10 +946,11 @@ class MergeBuilder {
   carryCJK = false
 
   reset(carryCJK: boolean): void {
-    this.texts.length = 0
-    this.isWordLike.length = 0
-    this.kinds.length = 0
-    this.starts.length = 0
+    // Create fresh arrays — previous arrays are owned by the returned MergedSegmentation
+    this.texts = []
+    this.isWordLike = []
+    this.kinds = []
+    this.starts = []
     this.len = 0
     this.carryCJK = carryCJK
   }
@@ -1083,18 +1097,19 @@ function buildMergedSegmentation(
     compactLen++
   }
 
-  // Copy arrays out of the builder — the builder arrays are reused across calls
-  const outTexts = mergedTexts.slice(0, compactLen)
-  const outWordLike = mergedWordLike.slice(0, compactLen)
-  const outKinds = mergedKinds.slice(0, compactLen)
-  const outStarts = mergedStarts.slice(0, compactLen)
+  // Truncate builder arrays to compact length — ownership transfers to the MergedSegmentation.
+  // The next reset() call will create fresh arrays for the builder.
+  mergedTexts.length = compactLen
+  mergedWordLike.length = compactLen
+  mergedKinds.length = compactLen
+  mergedStarts.length = compactLen
 
   const seg: MergedSegmentation = {
     len: compactLen,
-    texts: outTexts,
-    isWordLike: outWordLike,
-    kinds: outKinds,
-    starts: outStarts,
+    texts: mergedTexts,
+    isWordLike: mergedWordLike,
+    kinds: mergedKinds,
+    starts: mergedStarts,
   }
   mergeGlueConnectedTextRunsInPlace(seg)
   mergeUrlLikeRunsInPlace(seg)
