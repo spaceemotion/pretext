@@ -293,3 +293,53 @@ Full-path walk and stream (uses `FullLineWalker` / `FullLineRangeStepper`, uncha
 | Stream-F: 10k (mixed) | 77,987 | 80,807 | neutral |
 
 **Result:** Performance-neutral across all paths, as expected for a pure structural merge. No significant regressions. Class count reduced from 5 to 4, field count reduced from 68 to 58. All 60 tests pass.
+
+### Stage 3 (Cleanup): Merge `FullLineWalker` + `FullLineRangeStepper` → `FullLineEngine`
+
+**What:** Same structural merge pattern as Stage 2, applied to the full-path (soft-hyphen / tab / chunk-aware) classes. Two classes become a single `FullLineEngine` with two entry points:
+- `walkAll()` — iterates all chunks/segments, emits lines via `onLine` callback, returns count
+- `stepOne(cursor)` — finds the cursor's chunk, iterates from cursor, returns first completed `InternalLayoutLine | null`
+
+A `stepping` boolean flag distinguishes the two modes inside `appendBreakableSegmentFrom`. Walk-only helpers (`continueSoftHyphenBreakableSegment`, `emitEmptyChunk`) and step-only helpers (`maybeFinishAtSoftHyphen`, `finishLine`) coexist on the same class. The soft-hyphen handling is structurally different between the two modes — the walker's `continueSoftHyphenBreakableSegment` fits-and-continues while the stepper's `maybeFinishAtSoftHyphen` fits-and-returns — so both methods are kept rather than forcibly unified.
+
+**Class/field reduction:**
+- 4 classes → 3 classes (−1)
+- `FullLineWalker` (18 fields) + `FullLineRangeStepper` (17 fields) = 35 fields across 2 classes
+- `FullLineEngine` = 21 fields (15 state + 6 readonly ctor)
+- Total: 58 → 44 fields (−14, −24%)
+- Cumulative from Stage 1: 68 → 44 fields (−24, −35%)
+- File: 1088 → 1003 lines (−85 lines)
+
+**Benchmark:** Node v24.13.0, 50 iterations × 1000 calls, 20 warmup batches.
+
+layout() path (uses `SimpleLineCounter`, unchanged):
+
+| Case | Before (ns) | After (ns) | Change |
+|------|------------|-----------|--------|
+| Resize sweep (25w) | 49 | 48 | neutral |
+| Corpus 500 segs | 521 | 518 | neutral |
+| Magazine 2k segs | 2,087 | 2,106 | neutral |
+| CJK editorial 5k | 5,921 | 5,743 | neutral |
+| Thai 10k | 12,930 | 13,102 | neutral |
+| Arabic 37k | 48,030 | 48,025 | neutral |
+| Mixed 10k | 12,470 | 12,382 | neutral |
+
+Walk path (simple unchanged, full now uses `FullLineEngine.walkAll()`):
+
+| Case | Before (ns) | After (ns) | Change |
+|------|------------|-----------|--------|
+| Walk: Magazine 2k | 6,321 | 6,519 | neutral |
+| Walk: Arabic 37k | 114,054 | 114,180 | neutral |
+| Full: 2k (SHY+HB) | 8,746 | 8,488 | neutral |
+| Full: 10k (mixed) | 44,984 | 44,812 | neutral |
+
+Stream path (simple unchanged, full now uses `FullLineEngine.stepOne()`):
+
+| Case | Before (ns) | After (ns) | Change |
+|------|------------|-----------|--------|
+| Stream: Magazine 2k | 8,526 | 8,481 | neutral |
+| Stream: Mixed 10k | 40,819 | 39,946 | neutral |
+| Stream-F: 2k (SHY+HB) | 13,563 | 13,380 | neutral |
+| Stream-F: 10k (mixed) | 80,807 | 83,849 | neutral |
+
+**Result:** Performance-neutral across all paths. Class count reduced from 4 to 3, field count reduced from 58 to 44. File reduced by 85 lines. All 60 tests pass.
