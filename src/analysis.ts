@@ -1071,7 +1071,10 @@ function buildMergedSegmentation(
   const builder = mergeBuilder
   builder.reset(profile.carryCJKAfterClosingQuote)
 
-  for (const s of wordSegmenter.segment(normalized)) {
+  const segments = wordSegmenter.segment(normalized)
+  const iter = segments[Symbol.iterator]()
+  for (let r = iter.next(); !r.done; r = iter.next()) {
+    const s = r.value
     const seg = s.segment
     const wordLike = s.isWordLike ?? false
     // Fast path: if segment has no special chars, emit as single 'text' piece
