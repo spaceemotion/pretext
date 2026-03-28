@@ -129,6 +129,8 @@ export function countPreparedLines(prepared: PreparedLineBreakData, maxWidth: nu
   return walkPreparedLines(prepared, maxWidth)
 }
 
+// Separate from SimpleLineEngine to keep the layout() resize hot path lean:
+// SimpleLineCounter carries only 3 state fields vs SimpleLineEngine's 12+.
 class SimpleLineCounter {
   private lineCount = 0
   private lineW = 0
@@ -541,10 +543,6 @@ class FullLineEngine {
 
       this.hasContent = false
       this.lineW = 0
-      this.lineStartSegmentIndex = chunk.startSegmentIndex
-      this.lineStartGraphemeIndex = 0
-      this.lineEndSegmentIndex = chunk.startSegmentIndex
-      this.lineEndGraphemeIndex = 0
       this.clearPendingBreak()
 
       let i = chunk.startSegmentIndex

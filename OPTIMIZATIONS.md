@@ -376,3 +376,25 @@ Six targeted fixes in `src/line-break.ts` to improve readability and remove dead
 | Stream-F: 10k (mixed) | 78,343 | 87,219 | noise |
 
 **Result:** Performance-neutral. All 60 tests pass. Code is more consistent and has no dead guards or redundant resets.
+
+---
+
+## Cleanup Loop 2: Dead stores and documentation comment
+
+Two changes in `src/line-break.ts`:
+
+1. **Removed dead stores** of 4 cursor fields (`lineStartSegmentIndex`, `lineStartGraphemeIndex`, `lineEndSegmentIndex`, `lineEndGraphemeIndex`) at chunk-iteration start in `FullLineEngine.walkAll()`. These were always overwritten by `startLineAtSegment()` or `startLineAtGrapheme()` before being read — `hasContent` is set to `false` at chunk start, and all read sites are guarded by `hasContent`.
+
+2. **Added documentation comment** on `SimpleLineCounter` explaining why it exists as a separate class from `SimpleLineEngine`: the `layout()` resize hot path (11-20M ops/s) benefits from carrying only 3 state fields instead of 12+.
+
+**Benchmark:** Node v24.13.0, 50 iterations × 1000 calls, 20 warmup batches. Performance-neutral (verified with re-run to exclude system load artifact).
+
+| Case | Before (ns) | After (ns) | Change |
+|------|------------|-----------|--------|
+| Magazine 2k (layout) | 2,074 | 2,050 | neutral |
+| Arabic 37k (layout) | 47,569 | 47,001 | neutral |
+| Walk: Magazine 2k | 6,472 | 6,411 | neutral |
+| Full: 2k (SHY+HB) | 8,462 | 8,526 | neutral |
+| Full: 10k (mixed) | 45,354 | 44,738 | neutral |
+
+**Result:** Performance-neutral. All 60 tests pass. File reduced by 4 dead-store lines, gained 2 comment lines.
