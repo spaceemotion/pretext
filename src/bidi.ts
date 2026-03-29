@@ -173,7 +173,7 @@ function computeBidiLevels(str: string): Int8Array | null {
     }
   }
 
-  // N1-N2 + I1-I2 merged: resolve neutrals then compute levels
+  // N1: resolve neutral (ON) runs based on surrounding strong types
   for (let i = 0; i < len; i++) {
     if (types[i] !== ON) continue
     let end = i + 1
@@ -182,16 +182,15 @@ function computeBidiLevels(str: string): Int8Array | null {
     const after = end < len ? types[end]! : sor
     const bDir = before !== L ? R : L
     const aDir = after !== L ? R : L
-    if (bDir === aDir) {
-      for (let j = i; j < end; j++) types[j] = bDir
-    }
+    // N1: if directions agree, use that direction; N2: otherwise use embedding
+    const resolved = bDir === aDir ? bDir : e
+    for (let j = i; j < end; j++) types[j] = resolved
     i = end - 1
   }
 
-  // N2 + I1-I2 merged: resolve remaining ON and compute final levels
+  // I1-I2: compute final levels (no ON remains after N1/N2 resolution)
   for (let i = 0; i < len; i++) {
-    let t = types[i]!
-    if (t === ON) t = e
+    const t = types[i]!
     if ((levels[i]! & 1) === 0) {
       if (t === R) levels[i]!++
       else if (t === AN || t === EN) levels[i]! += 2
