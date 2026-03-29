@@ -398,3 +398,151 @@ Two changes in `src/line-break.ts`:
 | Full: 10k (mixed) | 45,354 | 44,738 | neutral |
 
 **Result:** Performance-neutral. All 60 tests pass. File reduced by 4 dead-store lines, gained 2 comment lines.
+
+---
+
+# Phase 2: analysis.ts optimization
+
+Target: `analyzeText()` pipeline in `src/analysis.ts` — the text analysis/segmentation phase called once per text change. Less hot than layout (not per-resize), but important for perceived responsiveness.
+
+Pipeline: normalize whitespace → `Intl.Segmenter.segment()` → classify/split by break kind → merge loop (CJK kinsoku, Arabic punctuation, Myanmar, quotes, etc.) → post-merge passes → `compileAnalysisChunks()`.
+
+**Key constraint:** `Intl.Segmenter` consumes ~55-60% of total `analyzeText()` time. Our optimization target is the remaining ~40-45%.
+
+## Phase 2 Baseline
+
+Established with `scripts/bench-analysis.ts` and `src/analysis.test.ts` (60 tests).
+
+| Case | Original (ns) |
+|------|--------------|
+| Latin short (45ch) | 5589 |
+| Latin medium (240ch) | 18640 |
+| Latin long (1000ch) | 88029 |
+| CJK mixed (230ch) | 42190 |
+| Arabic (250ch) | 22365 |
+| Mixed app (360ch) | 50977 |
+| CJK long (~5000ch) | 1235191 |
+| Arabic long (~5000ch) | 462047 |
+| Mixed long (~5000ch) | 572786 |
+| Pre-wrap short | 9970 |
+| Pre-wrap long | 276257 |
+
+## Phase 2 Round Log
+
+### Round 1: Replace `for...of` with `charCodeAt` loops, optimize `isCJK`
+
+**What:** Converted string iteration from `for...of` (iterator protocol overhead) to index-based `charCodeAt` loops. Restructured `isCJK` to check BMP ranges first, astral via surrogate pair decode only when needed.
+
+**Result:** ~5-15% improvement on most cases.
+
+### Round 2: Replace regex with charCode checks for Arabic/combining mark detection
+
+**What:** Replaced `arabicScriptRe.test()` and `combiningMarkRe.test()` with fast charCode range checks covering common BMP ranges, with regex fallback only for rare/extended ranges.
+
+**Result:** ~5-10% improvement, especially on Arabic text.
+
+### Round 3: Convert 7 post-merge passes to in-place mutation
+
+**What:** The 7 chained post-merge passes (`mergeGlueConnectedTextRuns`, `mergeUrlLikeRuns`, `mergeUrlQueryRuns`, `mergeNumericRuns`, `splitHyphenatedNumericRuns`, `mergeAsciiPunctuationChains`, `carryTrailingForwardStickyAcrossCJKBoundary`) each previously allocated 4 fresh arrays. Converted all to in-place mutation with read/write cursor compacting.
+
+**Result:** **10-33% improvement** — the biggest single win of Phase 2. Eliminated massive allocation churn.
+
+### Round 4: Replace piece array allocation with callback-based `forEachBreakKindPiece()`
+
+**What:** The segment splitting function previously allocated a `pieces[]` array + piece objects per segment. Converted to emit pieces directly via a callback, then later to direct `MergeBuilder.addPiece` calls.
+
+**Result:** ~3-8% improvement.
+
+### Round 5+6: Eliminate `Array.from(text)` and regex in helpers
+
+**What:** Replaced `Array.from(text)` in `splitTrailingForwardStickyCluster` with charCode-based backward scan. Replaced regex in `splitLeadingSpaceAndMarks` with charCode loop.
+
+**Result:** ~2-5% improvement.
+
+### Round 7: Restructure merge loop
+
+**What:** Factored out common guard in the segment merge loop, split word/non-word paths for clearer branch prediction.
+
+**Result:** ~2-4% improvement.
+
+### Round 8: `segmentNeedsSplitting()` fast-path
+
+**What:** Added a fast-path check before the full `forEachBreakKindPiece` call. Most word segments from `Intl.Segmenter` contain no special characters (spaces, NBSP, SHY, etc.), so a single charCode scan can skip the full per-char classification.
+
+**Result:** ~3-7% improvement.
+
+### Round 9: `MergeBuilder` class singleton
+
+**What:** Replaced the `mergePiece` closure with a reusable `MergeBuilder` class. Cached `WhiteSpaceProfile` as module-level constants. Eliminated `...segmentation` spread.
+
+**Result:** ~3-8% improvement.
+
+### Round 10: Inline Myanmar medial glue, fast-path single-char left-sticky punctuation
+
+**What:** Inlined Myanmar medial glue charCode check (`0x104F`). Added fast-path `segment.length === 1` check in `isLeftStickyPunctuationSegment`.
+
+**Result:** ~2-5% improvement.
+
+### Round 11: Reorder guards, transfer array ownership
+
+**What:** Reordered `endsWithArabicNoSpacePunctuation` guard (cheap check first). Transferred builder array ownership instead of `.slice()`. Fast-path classifier helpers.
+
+**Result:** Mostly neutral — 1st neutral toward ceiling. Reset by Round 12.
+
+### Round 12: Content-presence flags for post-merge pass skipping
+
+**What:** Added `hasGlue`, `hasCJK`, `hasArabicSpace` flags to `MergeBuilder`, set during `addPiece`. Used to skip irrelevant post-merge passes entirely.
+
+**Result:** **2-10% improvement.** Effective especially for Latin text (no glue/CJK/Arabic → skips 2 passes).
+
+### Round 13: `hasNonWordTextSegment` flag
+
+**What:** Added flag to skip escaped-quote/forward-sticky/compact post-passes when no non-word text segments survive the initial merge.
+
+**Result:** **~3-10% improvement.** Most Latin text produces only word and space segments after the merge loop.
+
+### Round 14: Manual `Symbol.iterator` for `Intl.Segmenter`
+
+**What:** Replaced `for...of` iteration of `Intl.Segmenter.segment()` with manual `Symbol.iterator()` + `.next()` loop to avoid iterator protocol overhead.
+
+**Result:** **~2-4% consistent improvement.**
+
+### Round 15: Uint8Array lookup table for `segmentNeedsSplitting` — REVERTED
+
+**What:** Attempted a 64KB `Uint8Array` lookup table to replace the charCode comparison chain in `segmentNeedsSplitting`. Cache misses from the large array outweighed saved comparisons.
+
+**Result:** Regression. Reverted immediately.
+
+### Round 16: Pre-scan normalized text for content-presence flags
+
+**What:** Added a single cheap charCode pre-scan over the normalized input string to detect `hasUrlLikeContent` (`://` or `www.`), `hasDigit` (ASCII digits 0-9 or common non-ASCII digit ranges), and `hasAsciiChainJoiner` (`;` or `,`). Gated `mergeUrlLikeRunsInPlace`, `mergeUrlQueryRunsInPlace`, `mergeNumericRunsInPlace`, `splitHyphenatedNumericRunsInPlace`, and `mergeAsciiPunctuationChainsInPlace` behind these flags. Also changed `isWordLike ?? false` to `isWordLike === true`.
+
+**Result:** **~6-22% improvement.** Biggest win on Latin/CJK/Arabic text without URLs or digits.
+
+### Rounds 17-19: Ceiling reached
+
+Attempted: `lastKind` tracking on builder (neutral), pre-sized arrays with `new Array(n)` (neutral — holey arrays slower in V8), single-space fast-path in iteration loop (neutral — CJK regression), Arabic guard reorder (neutral), inline `segmentNeedsSplitting` (neutral — function bloating hurts V8 optimization).
+
+**3 consecutive neutral rounds → ceiling declared.**
+
+## Phase 2 Final Results
+
+Node v24.13.0 | 50 iterations | 20 warmup
+
+| Case | Original (ns) | Final (ns) | Total Improvement |
+|------|--------------|------------|-------------------|
+| Latin short (45ch) | 5589 | ~3440 | **~38%** |
+| Latin medium (240ch) | 18640 | ~10850 | **~42%** |
+| Latin long (1000ch) | 88029 | ~45200 | **~49%** |
+| CJK mixed (230ch) | 42190 | ~25400 | **~40%** |
+| Arabic (250ch) | 22365 | ~9400 | **~58%** |
+| Mixed app (360ch) | 50977 | ~34400 | **~33%** |
+| CJK long (~5000ch) | 1235191 | ~690000 | **~44%** |
+| Arabic long (~5000ch) | 462047 | ~166000 | **~64%** |
+| Mixed long (~5000ch) | 572786 | ~313000 | **~45%** |
+| Pre-wrap short | 9970 | ~4900 | **~51%** |
+| Pre-wrap long | 276257 | ~113000 | **~59%** |
+
+**Key insight:** `Intl.Segmenter` is ~55-60% of total `analyzeText()` time — an external API we cannot optimize. Our code was the remaining ~40-45%, and we've captured the vast majority of the optimizable space. The ceiling is structural: further gains require either (a) reducing `Intl.Segmenter` calls, (b) moving to a completely different segmentation approach, or (c) architectural changes beyond the scope of per-function optimization.
+
+All 120 tests pass (60 layout + 60 analysis). No type errors in `src/`.
