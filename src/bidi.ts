@@ -71,10 +71,22 @@ function computeBidiLevels(str: string): Int8Array | null {
   const len = str.length
   if (len === 0) return null
 
+  // Fast pre-scan: check if any bidi characters exist before allocating.
+  // Most text is LTR-only, so this avoids a Uint8Array allocation in the
+  // common case. Only chars >= 0x0590 can be R/AL/AN.
+  let hasBidi = false
+  for (let i = 0; i < len; i++) {
+    if (str.charCodeAt(i) >= 0x0590) {
+      hasBidi = true
+      break
+    }
+  }
+
+  if (!hasBidi) return null
+
+  // Full classification pass (only reached when bidi chars are present)
   const types = new Uint8Array(len)
   let numBidi = 0
-
-  // Inline classifyChar for reduced call overhead
   for (let i = 0; i < len; i++) {
     const c = str.charCodeAt(i)
     let t: number
@@ -91,7 +103,7 @@ function computeBidiLevels(str: string): Int8Array | null {
 
   const startLevel = (len / numBidi) < 0.3 ? 0 : 1
   const levels = new Int8Array(len)
-  levels.fill(startLevel)
+  if (startLevel !== 0) levels.fill(startLevel)
 
   const e = (startLevel & 1) ? R : L
   const sor = e
