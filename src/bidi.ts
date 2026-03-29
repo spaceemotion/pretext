@@ -67,7 +67,12 @@ const arabicTypes = new Uint8Array([
   AL,AL,AL,AL,AL,AL,AL,AL,AL
 ])
 
-function computeBidiLevels(str: string): Int8Array | null {
+// Module-level slot for passing startLevel from computeBidiTypes to
+// computeSegmentLevels without allocating a wrapper object. Safe because
+// the two functions are always called in immediate sequence, single-threaded.
+let _startLevel = 0
+
+function computeBidiTypes(str: string): Uint8Array | null {
   const len = str.length
   if (len === 0) return null
 
@@ -101,9 +106,9 @@ function computeBidiLevels(str: string): Int8Array | null {
 
   if (numBidi === 0) return null
 
-  const startLevel = (len / numBidi) < 0.3 ? 0 : 1
+  _startLevel = (len / numBidi) < 0.3 ? 0 : 1
 
-  const e = (startLevel & 1) ? R : L
+  const e = (_startLevel & 1) ? R : L
   const sor = e
 
   // W1 + W2 + W3 merged: resolve NSM, convert EN after AL, and AL→R
@@ -186,38 +191,31 @@ function computeBidiLevels(str: string): Int8Array | null {
     i = end - 1
   }
 
-  // I1-I2: compute final levels directly from startLevel + resolved types
-  // Since startLevel is constant (0 or 1), we can compute the final level
-  // without a separate levels.fill() + read-modify-write pass.
-  const levels = new Int8Array(len)
-  if (startLevel === 0) {
-    // Even startLevel: R→1, AN/EN→2, L→0 (default)
-    for (let i = 0; i < len; i++) {
-      const t = types[i]!
-      if (t === R) levels[i] = 1
-      else if (t === AN || t === EN) levels[i] = 2
-      // L → 0 (already zero from allocation)
-    }
-  } else {
-    // Odd startLevel (1): L/AN/EN→2, R→1 (default)
-    for (let i = 0; i < len; i++) {
-      const t = types[i]!
-      if (t === L || t === AN || t === EN) levels[i] = 2
-      else levels[i] = 1
-      // R → 1, everything else → startLevel+1=2 for L/AN/EN
-    }
-  }
-
-  return levels
+  return types
 }
 
 export function computeSegmentLevels(normalized: string, segStarts: number[]): Int8Array | null {
-  const bidiLevels = computeBidiLevels(normalized)
-  if (bidiLevels === null) return null
+  const resolvedTypes = computeBidiTypes(normalized)
+  if (resolvedTypes === null) return null
 
+  // Compute I1-I2 levels only for segment-start positions, avoiding a
+  // full-length Int8Array allocation + loop over every character.
+  // _startLevel was set by computeBidiTypes() just above.
   const segLevels = new Int8Array(segStarts.length)
-  for (let i = 0; i < segStarts.length; i++) {
-    segLevels[i] = bidiLevels[segStarts[i]!]!
+  if (_startLevel === 0) {
+    // Even startLevel: R→1, AN/EN→2, L→0 (default from zero-init)
+    for (let i = 0; i < segStarts.length; i++) {
+      const t = resolvedTypes[segStarts[i]!]!
+      if (t === R) segLevels[i] = 1
+      else if (t === AN || t === EN) segLevels[i] = 2
+    }
+  } else {
+    // Odd startLevel (1): L/AN/EN→2, R→1
+    for (let i = 0; i < segStarts.length; i++) {
+      const t = resolvedTypes[segStarts[i]!]!
+      if (t === L || t === AN || t === EN) segLevels[i] = 2
+      else segLevels[i] = 1
+    }
   }
   return segLevels
 }
