@@ -67,14 +67,6 @@ const arabicTypes = new Uint8Array([
   AL,AL,AL,AL,AL,AL,AL,AL,AL
 ])
 
-function classifyChar(charCode: number): number {
-  if (charCode <= 0x00ff) return baseTypes[charCode]!
-  if (0x0590 <= charCode && charCode <= 0x05f4) return R
-  if (0x0600 <= charCode && charCode <= 0x06ff) return arabicTypes[charCode & 0xff]!
-  if (0x0700 <= charCode && charCode <= 0x08AC) return AL
-  return L
-}
-
 function computeBidiLevels(str: string): Int8Array | null {
   const len = str.length
   if (len === 0) return null
@@ -82,8 +74,15 @@ function computeBidiLevels(str: string): Int8Array | null {
   const types = new Uint8Array(len)
   let numBidi = 0
 
+  // Inline classifyChar for reduced call overhead
   for (let i = 0; i < len; i++) {
-    const t = classifyChar(str.charCodeAt(i))
+    const c = str.charCodeAt(i)
+    let t: number
+    if (c <= 0x00ff) t = baseTypes[c]!
+    else if (0x0590 <= c && c <= 0x05f4) t = R
+    else if (0x0600 <= c && c <= 0x06ff) t = arabicTypes[c & 0xff]!
+    else if (0x0700 <= c && c <= 0x08AC) t = AL
+    else t = L
     if (t === R || t === AL || t === AN) numBidi++
     types[i] = t
   }
@@ -92,7 +91,7 @@ function computeBidiLevels(str: string): Int8Array | null {
 
   const startLevel = (len / numBidi) < 0.3 ? 0 : 1
   const levels = new Int8Array(len)
-  for (let i = 0; i < len; i++) levels[i] = startLevel
+  levels.fill(startLevel)
 
   const e = (startLevel & 1) ? R : L
   const sor = e
