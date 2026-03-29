@@ -717,3 +717,142 @@ Node v24.13.0 | 50 iterations | 20 warmup
 - The ceiling is structural: the remaining work is the classification loop itself (one charCode read + one Uint8Array write per character) and the W/N-rule loops that cannot be eliminated by content flags.
 
 All 146 tests pass (60 layout + 60 analysis + 26 bidi). No type errors in `src/`.
+
+---
+
+## Total Impact Summary: `main` vs `perf/v8-optimizations`
+
+All numbers measured on the same machine in the same session. Baseline = `main` branch (unoptimized), Optimized = `perf/v8-optimizations` branch (all 3 phases applied). Times are median ns/op from Node.js (`npx tsx`) benchmarks.
+
+### layout() — resize hot path (Phase 1)
+
+| Case | main (ns) | optimized (ns) | Speedup |
+|---|---|---|---|
+| Latin short (6w) | 277 | 87 | **3.2×** |
+| Latin medium (25w) | 400 | 115 | **3.5×** |
+| Latin long (100w) | 982 | 173 | **5.7×** |
+| Resize sweep (25w) | 402 | 59 | **6.8×** |
+| CJK medium (50ch) | 586 | 85 | **6.9×** |
+| Long word overflow | 448 | 88 | **5.1×** |
+| Corpus 500 segs | 2,110 | 517 | **4.1×** |
+| Magazine 2k segs | 8,131 | 2,085 | **3.9×** |
+| CJK editorial 5k | 19,223 | 5,987 | **3.2×** |
+| Thai-like 10k | 40,797 | 13,029 | **3.1×** |
+| Arabic-like 37k | 146,712 | 47,717 | **3.1×** |
+| Mixed long 10k | 40,337 | 12,402 | **3.3×** |
+
+**Summary:** 3.1–6.9× faster across all text sizes. Small/medium texts see the largest relative gains (up to 6.9×) because the per-call overhead of closures + object allocation dominated. Large texts converge toward ~3× as the per-segment loop work dominates.
+
+### walkLineRanges() — rich batch geometry path (Phase 1)
+
+| Case | main (ns) | optimized (ns) | Speedup |
+|---|---|---|---|
+| Latin short (6w) | 1,814 | 59 | **30.7×** |
+| Latin medium (25w) | 2,039 | 152 | **13.4×** |
+| Latin long (100w) | 2,920 | 592 | **4.9×** |
+| CJK medium (50ch) | 2,250 | 274 | **8.2×** |
+| Long word overflow | 2,164 | 253 | **8.6×** |
+| Corpus 500 segs | 4,983 | 1,549 | **3.2×** |
+| Magazine 2k segs | 14,562 | 6,415 | **2.3×** |
+| CJK editorial 5k | 31,964 | 14,554 | **2.2×** |
+| Thai-like 10k | 64,927 | 32,466 | **2.0×** |
+| Arabic-like 37k | 219,801 | 114,334 | **1.9×** |
+| Mixed long 10k | 64,873 | 31,006 | **2.1×** |
+
+**Summary:** 1.9–30.7× faster. Short texts see extreme gains (30×) because the old walk path had heavy per-call setup. Large texts converge toward ~2× as the richer per-line materialization work dominates.
+
+### walkPreparedLines() — full walk with soft hyphens/chunks (Phase 1)
+
+| Case | main (ns) | optimized (ns) | Speedup |
+|---|---|---|---|
+| Latin 25w (SHY+HB) | 2,659 | 215 | **12.4×** |
+| Latin 100w (SHY+HB) | 3,947 | 798 | **4.9×** |
+| 500 segs (SHY+HB) | 6,467 | 2,018 | **3.2×** |
+| 2k segs (SHY+HB) | 19,801 | 8,609 | **2.3×** |
+| 5k segs (mixed) | 45,453 | 22,255 | **2.0×** |
+| 10k segs (mixed) | 86,898 | 45,418 | **1.9×** |
+
+**Summary:** 1.9–12.4× faster. Same pattern: enormous short-text gains from eliminated allocation overhead, converging toward ~2× for long texts.
+
+### layoutNextLine() — streaming API (Phase 1)
+
+| Case | main (ns) | optimized (ns) | Speedup |
+|---|---|---|---|
+| Latin short (6w) | 1,408 | 57 | **24.7×** |
+| Latin medium (25w) | 5,533 | 216 | **25.6×** |
+| Latin long (100w) | 18,106 | 785 | **23.1×** |
+| Corpus 500 segs | 46,694 | 2,005 | **23.3×** |
+| Magazine 2k segs | 190,366 | 9,707 | **19.6×** |
+| Mixed 10k segs | 766,926 | 45,039 | **17.0×** |
+| Full: 2k (SHY+HB) | 266,452 | 15,236 | **17.5×** |
+| Full: 10k (mixed) | 1,131,125 | 86,434 | **13.1×** |
+
+**Summary:** 13–26× faster across all sizes. The streaming path had the worst overhead per call in the old code (repeated closure creation for every `layoutNextLine()` invocation). The class-based refactoring eliminated this entirely, making the streaming API competitive with the batch paths.
+
+### analyzeText() — text analysis/segmentation (Phase 2)
+
+| Case | main (ns) | optimized (ns) | Speedup |
+|---|---|---|---|
+| Latin short (45ch) | 5,521 | 3,524 | **1.57×** (36%) |
+| Latin medium (240ch) | 19,479 | 10,948 | **1.78×** (44%) |
+| Latin long (1000ch) | 98,782 | 45,922 | **2.15×** (54%) |
+| CJK mixed (230ch) | 44,807 | 25,784 | **1.74×** (42%) |
+| Arabic (250ch) | 23,447 | 9,930 | **2.36×** (58%) |
+| Mixed app (360ch) | 54,005 | 35,698 | **1.51×** (34%) |
+| CJK long (~5000ch) | 1,291,329 | 693,906 | **1.86×** (46%) |
+| Arabic long (~5000ch) | 489,620 | 165,064 | **2.97×** (66%) |
+| Mixed long (~5000ch) | 620,850 | 316,673 | **1.96×** (49%) |
+| Pre-wrap short | 10,619 | 5,341 | **1.99×** (50%) |
+| Pre-wrap long | 303,978 | 217,634 | **1.40×** (28%) |
+
+**Summary:** 1.4–3.0× faster (28–66% reduction). Arabic text benefits the most because content-presence flags and in-place mutation eliminate entire passes that only apply to RTL/bidi content. The floor (~28–34%) is set by `Intl.Segmenter` which accounts for ~55–60% of total analysis time and cannot be optimized from JS.
+
+### computeSegmentLevels() — bidi level computation (Phase 3)
+
+| Case | main (ns) | optimized (ns) | Speedup |
+|---|---|---|---|
+| Latin short (45ch) | 110 | 36 | **3.1×** |
+| Latin long (700ch) | 2,125 | 657 | **3.2×** |
+| Hebrew short (24ch) | 315 | 66 | **4.8×** |
+| Hebrew medium (100ch) | 1,376 | 192 | **7.2×** |
+| Arabic short (35ch) | 454 | 142 | **3.2×** |
+| Arabic medium (160ch) | 2,062 | 844 | **2.4×** |
+| Mixed short (26ch) | 355 | 102 | **3.5×** |
+| Mixed medium (160ch) | 2,139 | 968 | **2.2×** |
+| Mixed app (220ch) | 2,676 | 1,286 | **2.1×** |
+| Hebrew long (~5000ch) | 61,087 | 9,633 | **6.3×** |
+| Arabic long (~5000ch) | 55,854 | 30,739 | **1.8×** |
+| Mixed long (~5500ch) | 62,359 | 33,594 | **1.9×** |
+
+**Summary:** 1.8–7.2× faster. Hebrew text benefits the most (up to 7.2×) because the pure-R fast path skips the entire W+N rule pipeline. Arabic and mixed bidi text see 1.8–3.2× gains from numeric type representation, Uint8Array buffers, and content-presence flag skipping.
+
+### Key Techniques Applied
+
+| Technique | Source | Impact |
+|---|---|---|
+| Class-based refactoring (closures → methods) | Phase 1 | 3–30× on layout hot paths |
+| Reusable object instances (eliminate per-call allocation) | Phase 1, 3 | 5–25× on streaming/short paths |
+| In-place mutation (avoid array copies in post-merge passes) | Phase 2 | ~15% analysis improvement |
+| Content-presence flags (skip irrelevant passes entirely) | Phase 2, 3 | 10–45% per phase |
+| Numeric type representation (string → number comparisons) | Phase 3 | 19–47% foundation for bidi |
+| Uint8Array typed buffers (module-scope reuse) | Phase 3 | 13–38% short/medium bidi |
+| Fast-path early exits (pure-LTR, pure-R scripts) | Phase 3 | 19–37% Hebrew |
+| Pre-merged segment passes (fewer array iterations) | Phase 2 | 5–10% analysis |
+
+### What Did NOT Work
+
+| Attempt | Expected | Actual | Root Cause |
+|---|---|---|---|
+| Shared base class for line engines | Cleaner code, no perf change | 24–35% regression | V8 bimorphic dispatch on prototype chains |
+| 64KB Uint8Array lookup table | Faster char classification | ~5% regression | L1 cache misses from large table |
+| Pre-sized arrays (`new Array(n)`) | Faster array filling | ~3% regression | V8 treats as holey arrays |
+| `TypedArray.subarray().indexOf()` | Faster searching | Severe regression | Function call overhead for small arrays |
+| Loop merging (bidi W-rules) | Fewer iterations | 27–36% regression | Inner loop too large for V8 optimizer |
+
+### Optimization Rounds by Phase
+
+- **Phase 1 (line-break.ts):** 4 rounds committed, 1 reverted. Class-based refactoring of 4 API paths.
+- **Phase 2 (analysis.ts):** 16 rounds committed, 3 reverted, 2 neutral. In-place mutation, content flags, merged passes.
+- **Phase 3 (bidi.ts):** 17 rounds committed, 2 reverted, 3 neutral (ceiling). Numeric types, typed buffers, fast paths.
+
+Total: 37 committed optimization rounds across 3 source files. All 146 tests pass. No type errors in `src/`.
