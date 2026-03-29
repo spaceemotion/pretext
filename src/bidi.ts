@@ -185,18 +185,16 @@ function computeBidiTypes(str: string): Uint8Array | null {
         w7Last = t
       }
     }
-  } else {
-    // No weak types, but WS still needs to become ON for N1 to resolve it.
-    for (let i = 0; i < len; i++) {
-      if (types[i] === WS) types[i] = ON
-    }
   }
 
-  // N1: resolve neutral (ON) runs based on surrounding strong types
+  // N1: resolve neutral (ON/WS) runs based on surrounding strong types.
+  // WS is treated as neutral here so we can skip the separate WS→ON
+  // conversion pass in the no-weak-types branch above.
   for (let i = 0; i < len; i++) {
-    if (types[i] !== ON) continue
+    const ti = types[i]!
+    if (ti !== ON && ti !== WS) continue
     let end = i + 1
-    while (end < len && types[end] === ON) end++
+    while (end < len && (types[end] === ON || types[end] === WS)) end++
     const before = i > 0 ? types[i - 1]! : sor
     const after = end < len ? types[end]! : sor
     const bDir = before !== L ? R : L
