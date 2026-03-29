@@ -546,3 +546,174 @@ Node v24.13.0 | 50 iterations | 20 warmup
 **Key insight:** `Intl.Segmenter` is ~55-60% of total `analyzeText()` time — an external API we cannot optimize. Our code was the remaining ~40-45%, and we've captured the vast majority of the optimizable space. The ceiling is structural: further gains require either (a) reducing `Intl.Segmenter` calls, (b) moving to a completely different segmentation approach, or (c) architectural changes beyond the scope of per-function optimization.
 
 All 120 tests pass (60 layout + 60 analysis). No type errors in `src/`.
+
+---
+
+# Phase 3: bidi.ts optimization
+
+Target: `computeSegmentLevels()` in `src/bidi.ts` — the bidirectional text level computation called once per `prepareWithSegments()`. Only runs for text containing RTL characters (Hebrew, Arabic, etc.). Returns `null` early for pure LTR text.
+
+Pipeline: fast pre-scan for bidi chars → full classification into bidi types → W-rules (weak type resolution) → N-rules (neutral resolution) → I-rules (level assignment at segment starts).
+
+## Phase 3 Baseline
+
+Established with `scripts/bench-bidi.ts` and `src/bidi.test.ts` (26 tests, 60 assertions).
+
+| Case | Original (ns) |
+|------|--------------|
+| Latin short (45ch) | 115 |
+| Latin long (700ch) | 2354 |
+| Hebrew short (24ch) | 421 |
+| Hebrew medium (100ch) | 1821 |
+| Arabic short (35ch) | 587 |
+| Arabic medium (160ch) | 2603 |
+| Mixed short (26ch) | 414 |
+| Mixed medium (160ch) | 2627 |
+| Hebrew long (~5000ch) | 82035 |
+| Arabic long (~5000ch) | 73745 |
+| Mixed long (~5500ch) | 74583 |
+
+## Phase 3 Round Log
+
+### Round 1: String BidiType → numeric constants + Uint8Array
+
+**What:** Replaced string-based bidi type constants (`'L'`, `'R'`, `'AL'`, etc.) with numeric constants (`L=0`, `R=1`, `AL=2`, ...). Changed the `types` array from `string[]` to `Uint8Array`. All comparisons are now numeric equality checks instead of string comparisons.
+
+**Result:** **19-47% improvement.** Largest gains on long texts where the type arrays are biggest.
+
+### Round 2: Merge W-rule loops
+
+**What:** Merged W1+W2+W3 into one loop (previously 3 separate loops), W6+W7 into one loop, and N2+I1/I2 into one loop. Reduced total array passes from ~10 to ~6.
+
+**Result:** **8-18% on short texts, 3-4% on long texts.**
+
+### Round 3: Inline classifyChar + TypedArray.fill()
+
+**What:** Inlined the `classifyChar` function body into the classification loop. Used `TypedArray.fill()` instead of manual loops where applicable.
+
+**Result:** **2-6% on medium/long texts.**
+
+### Round 4: Fast pre-scan for LTR early exit
+
+**What:** Added a cheap `charCodeAt >= 0x0590` pre-scan before allocating the `Uint8Array`. Most text is LTR-only, so this avoids allocation + classification entirely in the common case. Also skips the zero-fill of the types array when the buffer is being reused (already zeroed from prior call for the used portion).
+
+**Result:** **2.6× faster for LTR text**, neutral for RTL.
+
+### Round 5: Merge N2 into N1 loop
+
+**What:** Merged the separate N2 (remaining neutrals → embedding direction) pass into the existing N1 neutral-run resolution loop.
+
+**Result:** **~3% on long texts.**
+
+### Round 6: Direct level writes
+
+**What:** Changed from fill-then-read-modify-write to direct level writes. Instead of `Int8Array.fill(1)` then conditionally bumping to 2, writes the correct level directly based on the resolved bidi type.
+
+**Result:** **3-7%.**
+
+### Round 7: Deferred level computation
+
+**What:** Compute I1-I2 levels only at segment-start positions (the `segStarts` array) instead of computing levels for all characters. Eliminated a full `Int8Array` allocation for per-character levels.
+
+**Result:** **12-24%.**
+
+### Round 8: Content-presence flags
+
+**What:** Added `hasWeak` (EN/ET/ES/CS) and `hasALorNSM` flags during classification. Skip W1+W2+W3 entirely when no AL/NSM exist, skip W4-W7 entirely when no weak types exist. Most Hebrew text has neither.
+
+**Result:** **30-45% improvement on Hebrew, 19-26% on short texts.**
+
+### Round 9: Eliminate dead startLevel=0 branch
+
+**What:** The `startLevel` computation was `(len / numBidi) < 0.3 ? 0 : 1`. Since `numBidi <= len`, `len/numBidi >= 1 > 0.3` always, so `startLevel` was always 1 (RTL). Eliminated the dead LTR-paragraph branch and hardcoded `startLevel = 1`, `e = R`, `sor = R`.
+
+**Result:** **2-8%.**
+
+### Round 10: Move anyBidi flag into char-code branches
+
+**What:** Instead of checking `!anyBidi` after every character classification, set `anyBidi = true` only inside the char-code branches that produce bidi types (Hebrew, Arabic ranges). Removes a branch per iteration for non-bidi characters.
+
+**Result:** **2-14%.**
+
+### Round 11: Merge WS→ON into N1 neutral loop
+
+**What:** Made the N1 neutral-run loop treat WS as neutral alongside ON. This eliminated the need for a separate WS→ON conversion pass in the no-weak-types branch.
+
+**Result:** **5-8% on Hebrew.**
+
+### Round 12: Running prev variable in W4 loop
+
+**What:** Tracked `prev = types[i-1]` as a running variable instead of reading `types[i-1]` from the array on each iteration.
+
+**Result:** **3-4.5% on Arabic/mixed.**
+
+### Round 13: Simplify segment-level branch
+
+**What:** Simplified the I1-I2 level computation from a 3-way OR (`t === R || t === AN || t === EN`) to a single comparison (`t === R ? 1 : 2`). After all W+N rules resolve, only L, R, AN, and EN survive — so `!== R` means `L | AN | EN`, all of which get level 2.
+
+**Result:** **3-6% on short/medium texts.**
+
+### Round 14: Branch-free N1 direction resolution — NEUTRAL
+
+**What:** Attempted to replace the `before !== L ? R : L` conditional with a branch-free lookup. The neutral runs are too sparse for this to matter.
+
+### Round 15: Reusable module-scope Uint8Array buffer
+
+**What:** Replaced per-call `new Uint8Array(len)` with a module-scope buffer that grows as needed. Eliminates allocation + zero-init cost for every `computeBidiTypes()` call. Safe because the buffer is read synchronously by the single caller before any re-entrant call.
+
+**Result:** **13-38% improvement on short/medium texts.** Short texts benefit most because allocation cost was a larger fraction of total work.
+
+### Round 16: Merge classification + W1+W2+W3 into one loop — REVERTED
+
+**What:** Attempted to merge the classification loop and W1+W2+W3 loop into a single pass. The unconditional W-rule checks bloated the inner loop and prevented V8 from optimizing the tight classify-and-store pattern.
+
+**Result:** **+27-36% regression on Hebrew.** Reverted.
+
+### Round 17: Pure-R fast path for Hebrew-only text
+
+**What:** Added a post-classification check: when no weak types (`!hasWeak`) and no AL/NSM (`!hasALorNSM`) exist, scan for any L type. If none found, only R and neutrals survive, and since `sor = R`, N1 resolves every neutral run to R. All segment levels are 1. This skips the entire W+N pipeline and level computation. The L-scan only runs for Hebrew-only candidates, adding zero overhead for Arabic/mixed text.
+
+**Result:** **19-37% improvement on Hebrew.**
+
+### Round 18: `subarray().indexOf()` for L-scan — REVERTED
+
+**What:** Attempted to use `TypedArray.subarray().indexOf()` for the L-type scan in the pure-R fast path. Function call overhead of `subarray` + `indexOf` dominated for small arrays.
+
+**Result:** **+27-43% regression on short texts.** Reverted.
+
+### Rounds 19-21: Ceiling reached
+
+- **Round 19:** Cache `segStarts.length` in local variable. Neutral — V8 already optimizes `.length` as a fast property read.
+- **Round 20:** Conditional `types.fill()` for N1 neutral runs > 4 characters. Neutral — neutral runs in practice are typically 1-3 characters, so the branch is almost never taken.
+- **Round 21:** Track `lastStrong` running variable in N1 loop to avoid `types[i-1]` array read. Neutral — neutral runs are sparse enough that saving one read per run is unmeasurable.
+
+**3 consecutive neutral rounds → ceiling declared.**
+
+## Phase 3 Final Results
+
+Node v24.13.0 | 50 iterations | 20 warmup
+
+| Case | Original (ns) | Final (ns) | Total Improvement |
+|------|--------------|------------|-------------------|
+| Latin short (45ch) | 115 | 37 | **68%** |
+| Latin long (700ch) | 2354 | 656 | **72%** |
+| Hebrew short (24ch) | 421 | 66 | **84%** |
+| Hebrew medium (100ch) | 1821 | 194 | **89%** |
+| Arabic short (35ch) | 587 | 143 | **76%** |
+| Arabic medium (160ch) | 2603 | 848 | **67%** |
+| Mixed short (26ch) | 414 | 103 | **75%** |
+| Mixed medium (160ch) | 2627 | 962 | **63%** |
+| Mixed app (220ch) | — | 1292 | — |
+| Hebrew long (~5000ch) | 82035 | 9566 | **88%** |
+| Arabic long (~5000ch) | 73745 | 30673 | **58%** |
+| Mixed long (~5500ch) | 74583 | 33159 | **56%** |
+
+**Key insights:**
+- Numeric bidi types + Uint8Array was the foundation — every subsequent optimization built on fast numeric comparisons.
+- Content-presence flags (`hasWeak`, `hasALorNSM`) were the most powerful lever for skipping irrelevant W-rule passes entirely.
+- The pure-R fast path for Hebrew-only text (Round 17) was a major win because Hebrew text with no embedded Arabic/Latin can skip the entire W+N pipeline.
+- The reusable module-scope buffer (Round 15) eliminated per-call allocation overhead that dominated short-text benchmarks.
+- Merging loops CAN hurt (Round 16) when it bloats the inner loop body beyond V8's optimization comfort zone.
+- The ceiling is structural: the remaining work is the classification loop itself (one charCode read + one Uint8Array write per character) and the W/N-rule loops that cannot be eliminated by content flags.
+
+All 146 tests pass (60 layout + 60 analysis + 26 bidi). No type errors in `src/`.
