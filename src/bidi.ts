@@ -67,11 +67,6 @@ const arabicTypes = new Uint8Array([
   AL,AL,AL,AL,AL,AL,AL,AL,AL
 ])
 
-// Module-level slot for passing startLevel from computeBidiTypes to
-// computeSegmentLevels without allocating a wrapper object. Safe because
-// the two functions are always called in immediate sequence, single-threaded.
-let _startLevel = 0
-
 function computeBidiTypes(str: string): Uint8Array | null {
   const len = str.length
   if (len === 0) return null
@@ -91,7 +86,7 @@ function computeBidiTypes(str: string): Uint8Array | null {
 
   // Full classification pass (only reached when bidi chars are present)
   const types = new Uint8Array(len)
-  let numBidi = 0
+  let anyBidi = false
   let hasWeak = false    // EN/ET/ES/CS exist → W4-W7 needed
   let hasALorNSM = false // AL or NSM exist → W1+W2+W3 needed
   for (let i = 0; i < len; i++) {
@@ -112,16 +107,17 @@ function computeBidiTypes(str: string): Uint8Array | null {
       hasALorNSM = true
     }
     else t = L
-    if (t === R || t === AL || t === AN) numBidi++
+    if (!anyBidi && (t === R || t === AL || t === AN)) anyBidi = true
     types[i] = t
   }
 
-  if (numBidi === 0) return null
+  if (!anyBidi) return null
 
-  _startLevel = (len / numBidi) < 0.3 ? 0 : 1
-
-  const e = (_startLevel & 1) ? R : L
-  const sor = e
+  // Paragraph direction heuristic: (len / numBidi) < 0.3 ? 0 : 1
+  // Since numBidi <= len, len/numBidi >= 1 > 0.3 always → startLevel = 1.
+  // Embedding direction is always R for an RTL paragraph.
+  const e = R
+  const sor = R
 
   // W1 + W2 + W3: resolve NSM, convert EN after AL, and AL→R.
   // Skip entirely for pure Hebrew (no AL, no NSM, no weak types).
@@ -215,24 +211,13 @@ export function computeSegmentLevels(normalized: string, segStarts: number[]): I
   const resolvedTypes = computeBidiTypes(normalized)
   if (resolvedTypes === null) return null
 
-  // Compute I1-I2 levels only for segment-start positions, avoiding a
-  // full-length Int8Array allocation + loop over every character.
-  // _startLevel was set by computeBidiTypes() just above.
+  // I1-I2 levels at segment-start positions only.
+  // startLevel is always 1 (odd/RTL): L/AN/EN→2, R→1
   const segLevels = new Int8Array(segStarts.length)
-  if (_startLevel === 0) {
-    // Even startLevel: R→1, AN/EN→2, L→0 (default from zero-init)
-    for (let i = 0; i < segStarts.length; i++) {
-      const t = resolvedTypes[segStarts[i]!]!
-      if (t === R) segLevels[i] = 1
-      else if (t === AN || t === EN) segLevels[i] = 2
-    }
-  } else {
-    // Odd startLevel (1): L/AN/EN→2, R→1
-    for (let i = 0; i < segStarts.length; i++) {
-      const t = resolvedTypes[segStarts[i]!]!
-      if (t === L || t === AN || t === EN) segLevels[i] = 2
-      else segLevels[i] = 1
-    }
+  for (let i = 0; i < segStarts.length; i++) {
+    const t = resolvedTypes[segStarts[i]!]!
+    if (t === L || t === AN || t === EN) segLevels[i] = 2
+    else segLevels[i] = 1
   }
   return segLevels
 }
