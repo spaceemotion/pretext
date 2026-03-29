@@ -220,12 +220,11 @@ export function computeSegmentLevels(normalized: string, segStarts: number[]): I
   if (resolvedTypes === null) return null
 
   // I1-I2 levels at segment-start positions only.
-  // startLevel is always 1 (odd/RTL): L/AN/EN→2, R→1
+  // startLevel is always 1 (odd/RTL). After all W+N rules resolve,
+  // only L/R/AN/EN survive. R→1 (odd stays odd); L/AN/EN→2 (bump to even).
   const segLevels = new Int8Array(segStarts.length)
   for (let i = 0; i < segStarts.length; i++) {
-    const t = resolvedTypes[segStarts[i]!]!
-    if (t === L || t === AN || t === EN) segLevels[i] = 2
-    else segLevels[i] = 1
+    segLevels[i] = resolvedTypes[segStarts[i]!]! === R ? 1 : 2
   }
   return segLevels
 }
