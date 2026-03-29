@@ -48,6 +48,12 @@ const baseTypes = new Uint8Array([
 // (computeSegmentLevels) reads it synchronously before the next call.
 let typeBuf = new Uint8Array(256)
 
+// Module-scope flag set by computeBidiTypes() and read by computeSegmentLevels().
+// When true, all segment levels are 1 (R) — the caller can skip N1 + level
+// computation and just fill. Set when text is pure-R (Hebrew-only, no L, no
+// weak types, no AL/NSM) so all neutrals resolve to R under sor=R embedding.
+let allRLevels = false
+
 const arabicTypes = new Uint8Array([
   AL,AL,AL,AL,AL,AL,AL,AL,AL,AL,AL,AL,
   CS,AL,ON,ON,NSM,NSM,NSM,NSM,NSM,NSM,AL,
@@ -75,6 +81,7 @@ const arabicTypes = new Uint8Array([
 
 function computeBidiTypes(str: string): Uint8Array | null {
   const len = str.length
+  allRLevels = false
   if (len === 0) return null
 
   // Fast pre-scan: check if any bidi characters exist before allocating.
@@ -123,6 +130,22 @@ function computeBidiTypes(str: string): Uint8Array | null {
   }
 
   if (!anyBidi) return null
+
+  // Pure-R fast path: when text has no weak types and no AL/NSM,
+  // check if any L exists. If not, only R and neutrals survive, and
+  // since sor=R, N1 resolves every neutral run to R. All segment
+  // levels are 1. This post-scan only runs for Hebrew-only candidates
+  // (no Arabic, no mixed), so it doesn't add overhead to Arabic/mixed.
+  if (!hasWeak && !hasALorNSM) {
+    let pureR = true
+    for (let i = 0; i < len; i++) {
+      if (types[i] === L) { pureR = false; break }
+    }
+    if (pureR) {
+      allRLevels = true
+      return types  // return non-null so caller knows bidi exists
+    }
+  }
 
   // Paragraph direction heuristic: (len / numBidi) < 0.3 ? 0 : 1
   // Since numBidi <= len, len/numBidi >= 1 > 0.3 always → startLevel = 1.
@@ -226,6 +249,13 @@ function computeBidiTypes(str: string): Uint8Array | null {
 export function computeSegmentLevels(normalized: string, segStarts: number[]): Int8Array | null {
   const resolvedTypes = computeBidiTypes(normalized)
   if (resolvedTypes === null) return null
+
+  // Pure-R fast path: all levels are 1 (no N1, no per-segment type lookup)
+  if (allRLevels) {
+    const segLevels = new Int8Array(segStarts.length)
+    segLevels.fill(1)
+    return segLevels
+  }
 
   // I1-I2 levels at segment-start positions only.
   // startLevel is always 1 (odd/RTL). After all W+N rules resolve,
