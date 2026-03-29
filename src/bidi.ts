@@ -97,21 +97,34 @@ function computeBidiLevels(str: string): Int8Array | null {
   const e = (startLevel & 1) ? R : L
   const sor = e
 
-  // W1-W7
-  let lastType = sor
+  // W1 + W2 + W3 merged: resolve NSM, convert EN after AL, and AL→R
+  let w1Last = sor  // W1: tracks previous resolved type (any)
+  let w2Last = sor  // W2: tracks previous strong type (R/L/AL only)
   for (let i = 0; i < len; i++) {
-    if (types[i] === NSM) types[i] = lastType
-    else lastType = types[i]!
+    let t = types[i]!
+    // W1: NSM inherits previous type
+    if (t === NSM) {
+      t = w1Last
+      types[i] = t
+    }
+    w1Last = t
+    // W2: EN after AL → AN
+    if (t === EN) {
+      if (w2Last === AL) {
+        types[i] = AN
+        // Don't update w2Last — EN/AN are not strong
+      }
+    } else if (t === R || t === L || t === AL) {
+      // W3: AL → R (applied inline)
+      if (t === AL) {
+        types[i] = R
+        // But w2Last still sees the original AL for W2 purposes
+      }
+      w2Last = t
+    }
   }
-  lastType = sor
-  for (let i = 0; i < len; i++) {
-    const t = types[i]!
-    if (t === EN) types[i] = lastType === AL ? AN : EN
-    else if (t === R || t === L || t === AL) lastType = t
-  }
-  for (let i = 0; i < len; i++) {
-    if (types[i] === AL) types[i] = R
-  }
+
+  // W4-W5: ES between EN→EN, CS between EN/AN matching
   for (let i = 1; i < len - 1; i++) {
     if (types[i] === ES && types[i - 1] === EN && types[i + 1] === EN) {
       types[i] = EN
@@ -124,24 +137,32 @@ function computeBidiLevels(str: string): Int8Array | null {
       types[i] = types[i - 1]!
     }
   }
+
+  // W5: ET adjacent to EN → EN
   for (let i = 0; i < len; i++) {
     if (types[i] !== EN) continue
     let j
     for (j = i - 1; j >= 0 && types[j] === ET; j--) types[j] = EN
     for (j = i + 1; j < len && types[j] === ET; j++) types[j] = EN
   }
+
+  // W6 + W7 merged: neutralize weak types and resolve EN after L
+  let w7Last = sor  // W7: tracks previous strong type (R/L only)
   for (let i = 0; i < len; i++) {
-    const t = types[i]!
-    if (t === WS || t === ES || t === ET || t === CS) types[i] = ON
-  }
-  lastType = sor
-  for (let i = 0; i < len; i++) {
-    const t = types[i]!
-    if (t === EN) types[i] = lastType === L ? L : EN
-    else if (t === R || t === L) lastType = t
+    let t = types[i]!
+    // W6: remaining weak types → ON
+    if (t === WS || t === ES || t === ET || t === CS) {
+      types[i] = ON
+      // t is now ON, no need for W7 check
+    } else if (t === EN) {
+      // W7: EN after L → L
+      types[i] = w7Last === L ? L : EN
+    } else if (t === R || t === L) {
+      w7Last = t
+    }
   }
 
-  // N1-N2
+  // N1-N2 + I1-I2 merged: resolve neutrals then compute levels
   for (let i = 0; i < len; i++) {
     if (types[i] !== ON) continue
     let end = i + 1
@@ -155,13 +176,11 @@ function computeBidiLevels(str: string): Int8Array | null {
     }
     i = end - 1
   }
-  for (let i = 0; i < len; i++) {
-    if (types[i] === ON) types[i] = e
-  }
 
-  // I1-I2
+  // N2 + I1-I2 merged: resolve remaining ON and compute final levels
   for (let i = 0; i < len; i++) {
-    const t = types[i]!
+    let t = types[i]!
+    if (t === ON) t = e
     if ((levels[i]! & 1) === 0) {
       if (t === R) levels[i]!++
       else if (t === AN || t === EN) levels[i]! += 2
