@@ -102,8 +102,6 @@ function computeBidiLevels(str: string): Int8Array | null {
   if (numBidi === 0) return null
 
   const startLevel = (len / numBidi) < 0.3 ? 0 : 1
-  const levels = new Int8Array(len)
-  if (startLevel !== 0) levels.fill(startLevel)
 
   const e = (startLevel & 1) ? R : L
   const sor = e
@@ -188,14 +186,25 @@ function computeBidiLevels(str: string): Int8Array | null {
     i = end - 1
   }
 
-  // I1-I2: compute final levels (no ON remains after N1/N2 resolution)
-  for (let i = 0; i < len; i++) {
-    const t = types[i]!
-    if ((levels[i]! & 1) === 0) {
-      if (t === R) levels[i]!++
-      else if (t === AN || t === EN) levels[i]! += 2
-    } else if (t === L || t === AN || t === EN) {
-      levels[i]!++
+  // I1-I2: compute final levels directly from startLevel + resolved types
+  // Since startLevel is constant (0 or 1), we can compute the final level
+  // without a separate levels.fill() + read-modify-write pass.
+  const levels = new Int8Array(len)
+  if (startLevel === 0) {
+    // Even startLevel: R→1, AN/EN→2, L→0 (default)
+    for (let i = 0; i < len; i++) {
+      const t = types[i]!
+      if (t === R) levels[i] = 1
+      else if (t === AN || t === EN) levels[i] = 2
+      // L → 0 (already zero from allocation)
+    }
+  } else {
+    // Odd startLevel (1): L/AN/EN→2, R→1 (default)
+    for (let i = 0; i < len; i++) {
+      const t = types[i]!
+      if (t === L || t === AN || t === EN) levels[i] = 2
+      else levels[i] = 1
+      // R → 1, everything else → startLevel+1=2 for L/AN/EN
     }
   }
 
