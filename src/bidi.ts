@@ -42,6 +42,12 @@ const baseTypes = new Uint8Array([
   L,L,L,ON,L,L,L,L,L,L,L,L
 ])
 
+// Reusable buffer for bidi type classification. Grows as needed, avoiding
+// repeated allocation + zero-init for every computeBidiTypes() call.
+// Safe because computeBidiTypes() returns the buffer and its only caller
+// (computeSegmentLevels) reads it synchronously before the next call.
+let typeBuf = new Uint8Array(256)
+
 const arabicTypes = new Uint8Array([
   AL,AL,AL,AL,AL,AL,AL,AL,AL,AL,AL,AL,
   CS,AL,ON,ON,NSM,NSM,NSM,NSM,NSM,NSM,AL,
@@ -85,7 +91,9 @@ function computeBidiTypes(str: string): Uint8Array | null {
   if (!hasBidi) return null
 
   // Full classification pass (only reached when bidi chars are present)
-  const types = new Uint8Array(len)
+  // Reuse module-scope buffer to avoid allocation + zero-init per call.
+  if (typeBuf.length < len) typeBuf = new Uint8Array(len)
+  const types = typeBuf
   let anyBidi = false
   let hasWeak = false    // EN/ET/ES/CS exist → W4-W7 needed
   let hasALorNSM = false // AL or NSM exist → W1+W2+W3 needed
