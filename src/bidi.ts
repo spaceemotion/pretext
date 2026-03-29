@@ -94,20 +94,23 @@ function computeBidiTypes(str: string): Uint8Array | null {
     let t: number
     if (c <= 0x00ff) {
       t = baseTypes[c]!
-      // Weak types only come from the base table; check inside this branch
       if (!hasWeak && (t === EN || t === ET || t === ES || t === CS)) hasWeak = true
     }
-    else if (0x0590 <= c && c <= 0x05f4) t = R
+    else if (0x0590 <= c && c <= 0x05f4) {
+      t = R
+      anyBidi = true
+    }
     else if (0x0600 <= c && c <= 0x06ff) {
       t = arabicTypes[c & 0xff]!
-      hasALorNSM = true  // Arabic block always has AL or NSM
+      hasALorNSM = true
+      if (!anyBidi && (t === AL || t === AN)) anyBidi = true
     }
     else if (0x0700 <= c && c <= 0x08AC) {
       t = AL
+      anyBidi = true
       hasALorNSM = true
     }
     else t = L
-    if (!anyBidi && (t === R || t === AL || t === AN)) anyBidi = true
     types[i] = t
   }
 
