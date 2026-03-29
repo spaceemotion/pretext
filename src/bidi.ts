@@ -149,17 +149,24 @@ function computeBidiTypes(str: string): Uint8Array | null {
 
   // W4-W7: weak type resolution. Skip when no EN/ET/ES/CS exist.
   if (hasWeak) {
-    // W4-W5: ES between EN→EN, CS between EN/AN matching
+    // W4-W5: ES between EN→EN, CS between EN/AN matching.
+    // Use running prev to avoid repeated types[i-1] array reads.
+    let prev = types[0]!
     for (let i = 1; i < len - 1; i++) {
-      if (types[i] === ES && types[i - 1] === EN && types[i + 1] === EN) {
+      const cur = types[i]!
+      const next = types[i + 1]!
+      if (cur === ES && prev === EN && next === EN) {
         types[i] = EN
-      }
-      if (
-        types[i] === CS &&
-        (types[i - 1] === EN || types[i - 1] === AN) &&
-        types[i + 1] === types[i - 1]
+        prev = EN
+      } else if (
+        cur === CS &&
+        (prev === EN || prev === AN) &&
+        next === prev
       ) {
-        types[i] = types[i - 1]!
+        types[i] = prev
+        // prev stays unchanged (already the resolved value)
+      } else {
+        prev = cur
       }
     }
 
